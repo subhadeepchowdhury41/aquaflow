@@ -1,0 +1,101 @@
+import uuid
+from datetime import datetime, date, timezone
+from sqlalchemy import Column, String, Boolean, Integer, Float, Date, DateTime, ForeignKey, JSON, Text
+from sqlalchemy.orm import relationship
+from app.core.database import TenantAwareModel, GUID
+
+
+class DeliveryRoute(TenantAwareModel):
+    __tablename__ = "delivery_routes"
+
+    branch_id = Column(GUID(), ForeignKey("branches.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(255), nullable=True)
+    default_driver_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    branch = relationship("Branch")
+    default_driver = relationship("User")
+    customers = relationship("Customer", back_populates="route")
+
+
+class Subscription(TenantAwareModel):
+    __tablename__ = "subscriptions"
+
+    customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(GUID(), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True)
+    branch_id = Column(GUID(), ForeignKey("branches.id", ondelete="CASCADE"), nullable=False)
+    route_id = Column(GUID(), ForeignKey("delivery_routes.id", ondelete="SET NULL"), nullable=True)
+    driver_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    quantity = Column(Integer, default=1, nullable=False)
+    schedule_type = Column(String(50), default="daily", nullable=False)
+    # Types: daily, alternate_days, weekly, weekdays, custom
+    schedule_days = Column(JSON, default=list, nullable=False)  # e.g., [0, 1, 2, 3, 4] for Mon-Fri
+    shift = Column(String(50), default="morning", nullable=False)  # morning, afternoon, evening
+    unit_price = Column(Float, nullable=False)
+
+    status = Column(String(50), default="active", nullable=False, index=True)  # active, paused, cancelled
+    pause_start = Column(Date, nullable=True)
+    pause_resume_date = Column(Date, nullable=True)
+
+    start_date = Column(Date, default=date.today, nullable=False)
+    end_date = Column(Date, nullable=True)
+
+    customer = relationship("Customer", back_populates="subscriptions")
+    product = relationship("Product")
+
+
+class DeliveryTask(TenantAwareModel):
+    __tablename__ = "delivery_tasks"
+
+    branch_id = Column(GUID(), ForeignKey("branches.id", ondelete="CASCADE"), nullable=False, index=True)
+    route_id = Column(GUID(), ForeignKey("delivery_routes.id", ondelete="SET NULL"), nullable=True, index=True)
+    driver_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(GUID(), ForeignKey("subscriptions.id", ondelete="SET NULL"), nullable=True)
+    product_id = Column(GUID(), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False)
+
+    scheduled_date = Column(Date, default=date.today, nullable=False, index=True)
+    shift = Column(String(50), default="morning", nullable=False)
+    expected_qty = Column(Integer, default=1, nullable=False)
+
+    status = Column(String(50), default="pending", nullable=False, index=True)
+    # pending, in_transit, completed, partially_completed, failed, cancelled
+    sequence_order = Column(Integer, default=0, nullable=False)
+    idempotency_key = Column(String(128), unique=True, nullable=False, index=True)
+
+    customer = relationship("Customer")
+    product = relationship("Product")
+    driver = relationship("User")
+    delivery_record = relationship("DeliveryRecord", back_populates="task", uselist=False, cascade="all, delete-orphan")
+
+
+class DeliveryRecord(TenantAwareModel):
+    __tablename__ = "delivery_records"
+
+    delivery_task_id = Column(GUID(), ForeignKey("delivery_tasks.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    driver_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    delivered_qty = Column(Integer, default=0, nullable=False)
+    empty_collected_qty = Column(Integer, default=0, nullable=False)
+    cash_collected = Column(Float, default=0.0, nullable=False)
+    payment_mode = Column(String(50), default="unpaid", nullable=False)  # unpaid, cash, upi, qr_scan
+
+    delivery_status = Column(String(50), default="delivered", nullable=False)  # delivered, failed, rescheduled
+    failure_reason = Column(String(255), nullable=True)
+    notes = Column(Text, nullable=True)
+    proof_photo_url = Column(String(500), nullable=True)
+
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    delivered_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    # Offline-First idempotency key generated by Driver device
+    client_tx_id = Column(String(128), unique=True, nullable=True, index=True)
+
+    task = relationship("DeliveryTask", back_populates="delivery_record")
+    driver = relationship("User")
+    customer = relationship("Customer")
+

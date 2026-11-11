@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment & database files
+.env
+*.db
+*.sqlite3
+test_aquaflow.db
+aquaflow.db
+
+# Build outputs
+frontend/dist/
+frontend/dist-ssr/
+*.egg-info/
+.pytest_cache/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
