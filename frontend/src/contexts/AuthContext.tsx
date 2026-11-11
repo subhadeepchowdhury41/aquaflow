@@ -84,6 +84,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('aquaflow_refresh_token');
     setUser(null);
     setLicense(null);
+    if (window.location.pathname !== '/auth/login' && window.location.pathname !== '/auth/register') {
+      window.location.href = '/auth/login';
+    }
   };
 
   const refreshProfile = async () => {

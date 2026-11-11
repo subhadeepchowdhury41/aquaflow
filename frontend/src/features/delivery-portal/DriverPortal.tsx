@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { 
@@ -27,7 +28,13 @@ interface Stop {
 }
 
 export const DriverPortal: React.FC = () => {
+  const navigate = useNavigate();
   const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/auth/login');
+  };
   const [stops, setStops] = useState<Stop[]>([]);
   const [loading, setLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -143,8 +150,13 @@ export const DriverPortal: React.FC = () => {
             {isOnline ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
             {isOnline ? 'Online' : 'Offline Mode'}
           </span>
-          <button onClick={logout} className="text-slate-400 hover:text-rose-400">
+          <button
+            onClick={handleLogout}
+            className="inline-flex items-center gap-1 text-slate-400 hover:text-rose-400 p-1 rounded transition-colors cursor-pointer"
+            title="Log Out"
+          >
             <LogOut className="w-4 h-4" />
+            <span className="text-[11px] font-medium hidden sm:inline">Logout</span>
           </button>
         </div>
       </header>

@@ -48,6 +48,10 @@ apiClient.interceptors.response.use(
         }
       } else {
         localStorage.removeItem('aquaflow_token');
+        localStorage.removeItem('aquaflow_refresh_token');
+        if (window.location.pathname !== '/auth/login' && window.location.pathname !== '/auth/register') {
+          window.location.href = '/auth/login';
+        }
       }
     }
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -128,7 +129,13 @@ interface ServiceTicket {
 }
 
 export const CustomerPortal: React.FC = () => {
+  const navigate = useNavigate();
   const { logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/auth/login');
+  };
   const [activeTab, setActiveTab] = useState<'orders' | 'dues' | 'requests'>('orders');
   
   const [profile, setProfile] = useState<ProfileData | null>(null);
@@ -282,11 +289,12 @@ export const CustomerPortal: React.FC = () => {
               <QrCode className="w-5 h-5" />
             </button>
             <button
-              onClick={logout}
-              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-slate-100 rounded-lg transition"
-              title="Sign Out"
+              onClick={handleLogout}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 rounded-lg transition-colors cursor-pointer"
+              title="Sign Out of Account"
             >
-              <LogOut className="w-5 h-5" />
+              <LogOut className="w-4 h-4 text-slate-400 group-hover:text-rose-500" />
+              <span>Sign Out</span>
             </button>
           </div>
         </div>

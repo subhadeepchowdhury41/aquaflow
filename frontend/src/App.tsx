@@ -90,10 +90,24 @@ export default function App() {
           </Route>
 
           {/* Delivery Driver Mobile-first PWA */}
-          <Route path="/delivery" element={<DriverPortal />} />
+          <Route
+            path="/delivery"
+            element={
+              <ProtectedRoute>
+                <DriverPortal />
+              </ProtectedRoute>
+            }
+          />
 
           {/* Customer Self-Service Portal */}
-          <Route path="/customer" element={<CustomerPortal />} />
+          <Route
+            path="/customer"
+            element={
+              <ProtectedRoute>
+                <CustomerPortal />
+              </ProtectedRoute>
+            }
+          />
 
           {/* Root redirect */}
           <Route path="*" element={<Navigate to="/auth/login" replace />} />
