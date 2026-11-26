@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from '@/contexts/AuthContext';
+import { SnackbarProvider } from '@/contexts/SnackbarContext';
 
 // Layouts
 import { PlatformLayout } from '@/layouts/PlatformLayout';
@@ -50,8 +51,9 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode; requiresAdmin?: bool
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
+    <SnackbarProvider>
+      <AuthProvider>
+        <BrowserRouter>
         <Routes>
           {/* Public Authentication */}
           <Route path="/auth/login" element={<LoginPage />} />
@@ -116,5 +118,6 @@ export default function App() {
         </Routes>
       </BrowserRouter>
     </AuthProvider>
+    </SnackbarProvider>
   );
 }

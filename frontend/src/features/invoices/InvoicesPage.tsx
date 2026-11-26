@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { apiClient } from '@/api/client';
+import { useSnackbar } from '@/contexts/SnackbarContext';
 import { 
   Receipt, 
   Plus, 
   IndianRupee, 
   FileText, 
   CheckCircle2, 
+  AlertCircle,
   Clock, 
   Calendar,
   CreditCard,
@@ -35,6 +37,7 @@ interface CustomerOption {
 }
 
 export const InvoicesPage: React.FC = () => {
+  const { showSnackbar } = useSnackbar();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [customers, setCustomers] = useState<CustomerOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,9 +46,11 @@ export const InvoicesPage: React.FC = () => {
   const [isGenerateOpen, setIsGenerateOpen] = useState(false);
   const [genMonth, setGenMonth] = useState(new Date().getMonth() + 1);
   const [genYear, setGenYear] = useState(new Date().getFullYear());
+  const [generateFeedback, setGenerateFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Record Payment modal
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
+  const [paymentFeedback, setPaymentFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [paymentForm, setPaymentForm] = useState({
     customer_id: '',
     amount: 500,
@@ -80,24 +85,28 @@ export const InvoicesPage: React.FC = () => {
   const handleGenerateInvoices = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      setGenerateFeedback(null);
       const res = await apiClient.post('/invoices/generate-monthly', {
         billing_month: genMonth,
         billing_year: genYear,
         due_days: 7,
       });
-      alert(`Bulk Invoicing Complete: ${res.data.message}`);
-      setIsGenerateOpen(false);
+      const msg = `Bulk Invoicing Complete: ${res.data.message}`;
+      setGenerateFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadData();
     } catch (err: any) {
-      alert(err.response?.data?.detail?.message || 'Invoice generation failed');
+      const errMsg = err.response?.data?.detail?.message || err.response?.data?.detail || 'Invoice generation failed';
+      setGenerateFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     }
   };
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await apiClient.post('/invoices/payments', paymentForm);
-      setIsPaymentOpen(false);
+      setPaymentFeedback(null);
+      const res = await apiClient.post('/invoices/payments', paymentForm);
       setPaymentForm({
         customer_id: customers[0]?.id || '',
         amount: 500,
@@ -105,10 +114,14 @@ export const InvoicesPage: React.FC = () => {
         payment_ref_id: '',
         notes: '',
       });
-      alert('Payment recorded and credited to customer ledger successfully.');
+      const msg = `Payment ${res.data?.payment_number || ''} recorded and credited to customer ledger successfully.`;
+      setPaymentFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadData();
     } catch (err: any) {
-      alert('Payment recording failed');
+      const errMsg = err.response?.data?.detail || 'Payment recording failed';
+      setPaymentFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     }
   };
 
@@ -121,14 +134,20 @@ export const InvoicesPage: React.FC = () => {
         </div>
         <div className="flex items-center space-x-2">
           <button
-            onClick={() => setIsPaymentOpen(true)}
+            onClick={() => {
+              setPaymentFeedback(null);
+              setIsPaymentOpen(true);
+            }}
             className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition"
           >
             <CreditCard className="w-3.5 h-3.5" />
             <span>Record Payment</span>
           </button>
           <button
-            onClick={() => setIsGenerateOpen(true)}
+            onClick={() => {
+              setGenerateFeedback(null);
+              setIsGenerateOpen(true);
+            }}
             className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-xs font-semibold shadow-sm transition"
           >
             <Calendar className="w-3.5 h-3.5" />
@@ -216,6 +235,36 @@ export const InvoicesPage: React.FC = () => {
             <p className="text-xs text-slate-500 mb-4">
               Aggregates all completed jar delivery logs for the cycle, calculates GST, and posts invoices.
             </p>
+            {generateFeedback && (
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                  generateFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {generateFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium">{generateFeedback.message}</div>
+              </div>
+            )}
+            {generateFeedback?.type === 'success' ? (
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsGenerateOpen(false);
+                    setGenerateFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
             <form onSubmit={handleGenerateInvoices} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -257,6 +306,7 @@ export const InvoicesPage: React.FC = () => {
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}
@@ -269,6 +319,43 @@ export const InvoicesPage: React.FC = () => {
             <p className="text-xs text-slate-500 mb-4">
               Receipts are recorded and immediately credited to the immutable customer ledger.
             </p>
+            {paymentFeedback && (
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                  paymentFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {paymentFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium">{paymentFeedback.message}</div>
+              </div>
+            )}
+            {paymentFeedback?.type === 'success' ? (
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setPaymentFeedback(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Record Another
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPaymentOpen(false);
+                    setPaymentFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
             <form onSubmit={handleRecordPayment} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">Select Customer</label>
@@ -339,6 +426,7 @@ export const InvoicesPage: React.FC = () => {
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}

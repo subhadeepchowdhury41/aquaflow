@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSnackbar } from '@/contexts/SnackbarContext';
 import { 
   Truck, 
   MapPin, 
@@ -97,6 +98,7 @@ interface MonthlyReport {
 export const DriverPortal: React.FC = () => {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
+  const { showSnackbar } = useSnackbar();
 
   const handleLogout = () => {
     logout();
@@ -149,6 +151,8 @@ export const DriverPortal: React.FC = () => {
   const [cashCollected, setCashCollected] = useState(0);
   const [paymentMode, setPaymentMode] = useState<'cash' | 'upi' | 'unpaid'>('unpaid');
   const [deliveryNotes, setDeliveryNotes] = useState('');
+  const [drawerFeedback, setDrawerFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [reassignFeedback, setReassignFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Save jars on van
   const updateJarsOnVan = (newCount: number) => {
@@ -248,17 +252,20 @@ export const DriverPortal: React.FC = () => {
       await apiClient.post('/deliveries/sync', { actions: queue });
       localStorage.removeItem('aquaflow_driver_offline_queue');
       setOfflineQueue([]);
-      alert(`Synchronized ${queue.length} offline deliveries to central plant!`);
+      showSnackbar(`Synchronized ${queue.length} offline deliveries to central plant!`, 'success');
       await loadStops();
       if (activeTab === 'completed') loadCompletedShipments();
     } catch (err) {
       console.error('Offline sync failed', err);
+      showSnackbar('Offline sync failed — will retry automatically.', 'error');
     }
   };
 
   // Open shipment details modal — autofill jar amounts & amount to collect
   const openOrderDetails = (stop: DriverShipment) => {
     setActiveStop(stop);
+    setDrawerFeedback(null);
+    setReassignFeedback(null);
     setDeliveredQty(stop.assigned_qty);
     setEmptyQty(stop.assigned_qty);
     setCashCollected(stop.amount_to_collect || 0);
@@ -269,6 +276,7 @@ export const DriverPortal: React.FC = () => {
   // Execute shipment completion
   const handleRecordStop = async () => {
     if (!activeStop) return;
+    setDrawerFeedback(null);
 
     const isPartial = deliveredQty < activeStop.assigned_qty;
     const effectiveMode = cashCollected > 0 ? (paymentMode === 'unpaid' ? 'cash' : paymentMode) : 'unpaid';
@@ -290,37 +298,45 @@ export const DriverPortal: React.FC = () => {
 
       setStops(stops.filter((s) => s.id !== activeStop.id));
       updateJarsOnVan(Math.max(0, jarsOnVan - deliveredQty));
-      setActiveStop(null);
-      alert('Shipment recorded offline. Will sync automatically when connected.');
+      const msg = 'Shipment recorded offline. Will sync automatically when connected.';
+      setDrawerFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'info');
       return;
     }
 
     try {
       await apiClient.post(`/deliveries/shipments/${activeStop.id}/complete`, payload);
       updateJarsOnVan(Math.max(0, jarsOnVan - deliveredQty));
-      setActiveStop(null);
+      const msg = `Shipment ${activeStop.shipment_number} (${deliveredQty} jars) recorded successfully!`;
+      setDrawerFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadStops();
       if (activeTab === 'completed') loadCompletedShipments();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to record shipment');
+      const errMsg = err.response?.data?.detail || 'Failed to record shipment';
+      setDrawerFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     }
   };
 
   // Reassign shipment to another driver
   const handleReassignOrder = async () => {
     if (!activeStop || !targetColleagueId) return;
+    setReassignFeedback(null);
 
     try {
       const res = await apiClient.post(`/deliveries/shipments/${activeStop.id}/reassign`, {
         new_driver_id: targetColleagueId,
         notes: reassignNotes || 'Reassigned from driver van'
       });
-      alert(res.data.message || 'Shipment successfully reassigned to another driver!');
-      setIsReassignModalOpen(false);
-      setActiveStop(null);
+      const msg = res.data.message || 'Shipment successfully reassigned to another driver!';
+      setReassignFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadStops();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reassign shipment');
+      const errMsg = err.response?.data?.detail || 'Failed to reassign shipment';
+      setReassignFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     }
   };
 
@@ -984,7 +1000,33 @@ export const DriverPortal: React.FC = () => {
               />
             </div>
 
-            {/* Buttons: Submit & Reassign */}
+            {/* Feedback Banner inside Driver Drawer */}
+            {drawerFeedback && (
+              <div
+                className={`p-3 rounded-2xl border text-xs flex items-start gap-2 ${
+                  drawerFeedback.type === 'success'
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                }`}
+              >
+                <CheckCircle2 className={`w-4 h-4 flex-shrink-0 mt-0.5 ${drawerFeedback.type === 'success' ? 'text-emerald-400' : 'text-rose-400'}`} />
+                <span className="font-medium">{drawerFeedback.message}</span>
+              </div>
+            )}
+
+            {/* Buttons: Submit & Reassign (or Done after success) */}
+            {drawerFeedback?.type === 'success' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveStop(null);
+                  setDrawerFeedback(null);
+                }}
+                className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-sm font-extrabold shadow-lg transition"
+              >
+                Done
+              </button>
+            ) : (
             <div className="space-y-2 pt-1">
               <button
                 onClick={handleRecordStop}
@@ -1004,12 +1046,16 @@ export const DriverPortal: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => setIsReassignModalOpen(true)}
+                onClick={() => {
+                  setReassignFeedback(null);
+                  setIsReassignModalOpen(true);
+                }}
                 className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-1.5"
               >
                 <span>Transfer Shipment to Another Driver</span>
               </button>
             </div>
+            )}
           </div>
         </div>
       )}
@@ -1034,6 +1080,33 @@ export const DriverPortal: React.FC = () => {
               Transfer <strong>{activeStop.customer_name}</strong> ({activeStop.shipment_number}: {activeStop.assigned_qty} x {activeStop.product_name}) to another driver:
             </p>
 
+            {reassignFeedback && (
+              <div
+                className={`p-3 rounded-2xl border text-xs flex items-start gap-2 ${
+                  reassignFeedback.type === 'success'
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                }`}
+              >
+                <CheckCircle2 className={`w-4 h-4 flex-shrink-0 mt-0.5 ${reassignFeedback.type === 'success' ? 'text-emerald-400' : 'text-rose-400'}`} />
+                <span className="font-medium">{reassignFeedback.message}</span>
+              </div>
+            )}
+
+            {reassignFeedback?.type === 'success' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsReassignModalOpen(false);
+                  setActiveStop(null);
+                  setReassignFeedback(null);
+                }}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold shadow-lg"
+              >
+                Done
+              </button>
+            ) : (
+            <>
             <div>
               <label className="block text-xs font-semibold text-slate-400 mb-1.5">Select Colleague Driver</label>
               <select
@@ -1074,6 +1147,8 @@ export const DriverPortal: React.FC = () => {
                 Confirm Transfer
               </button>
             </div>
+            </>
+            )}
           </div>
         </div>
       )}

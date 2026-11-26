@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { apiClient } from '@/api/client';
+import { useSnackbar } from '@/contexts/SnackbarContext';
 import { 
   Truck, 
   CheckCircle2, 
@@ -139,6 +140,7 @@ const STAGE_LABEL: Record<string, { label: string; cls: string }> = {
 
 export const DeliveriesPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { showSnackbar } = useSnackbar();
   const [tasks, setTasks] = useState<OrderTask[]>([]);
   const [requestedCountAllDates, setRequestedCountAllDates] = useState(0);
   const [drivers, setDrivers] = useState<AvailableDriver[]>([]);
@@ -160,11 +162,13 @@ export const DeliveriesPage: React.FC = () => {
   const [assignCollectAmount, setAssignCollectAmount] = useState<number>(0);
   const [assignNotes, setAssignNotes] = useState<string>('');
   const [submittingAssign, setSubmittingAssign] = useState(false);
+  const [assignFeedback, setAssignFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Reject Order Modal
   const [rejectModalOrder, setRejectModalOrder] = useState<OrderTask | null>(null);
   const [rejectReason, setRejectReason] = useState<string>('');
   const [submittingReject, setSubmittingReject] = useState(false);
+  const [rejectFeedback, setRejectFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Order History Modal (Shipments tab + Payments tab — NO ledger)
   const [historyModalOrder, setHistoryModalOrder] = useState<OrderTask | null>(null);
@@ -177,6 +181,7 @@ export const DeliveriesPage: React.FC = () => {
   const [payRefId, setPayRefId] = useState<string>('');
   const [payNotes, setPayNotes] = useState<string>('');
   const [savingPayment, setSavingPayment] = useState(false);
+  const [quickPayFeedback, setQuickPayFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Create Order Modal (Owner)
   const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
@@ -191,6 +196,7 @@ export const DeliveriesPage: React.FC = () => {
   const [upfrontPayRef, setUpfrontPayRef] = useState('');
   const [initialShipments, setInitialShipments] = useState<InitialShipmentRow[]>([]);
   const [creatingOrder, setCreatingOrder] = useState(false);
+  const [createOrderFeedback, setCreateOrderFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   const loadMetadata = async () => {
     try {
@@ -291,6 +297,7 @@ export const DeliveriesPage: React.FC = () => {
     const defaultCollect = Math.min(unpaidLeft, proportional);
 
     setAssignModalOrder(order);
+    setAssignFeedback(null);
     if (!assignDriverId && drivers.length > 0) setAssignDriverId(drivers[0].id);
     setAssignQty(qty);
     setAssignCollectAmount(Number(defaultCollect.toFixed(2)));
@@ -314,20 +321,25 @@ export const DeliveriesPage: React.FC = () => {
     if (!assignModalOrder || !assignDriverId) return;
     try {
       setSubmittingAssign(true);
-      await apiClient.post(`/deliveries/${assignModalOrder.id}/shipments`, {
+      setAssignFeedback(null);
+      const res = await apiClient.post(`/deliveries/${assignModalOrder.id}/shipments`, {
         driver_id: assignDriverId,
         assigned_qty: assignQty,
         amount_to_collect: assignCollectAmount,
         notes: assignNotes || undefined,
       });
       const updatedId = assignModalOrder.id;
-      setAssignModalOrder(null);
+      const msg = `Shipment ${res.data.shipment_number || ''} (${assignQty} jars) assigned to ${res.data.driver_name || 'driver'} successfully.`;
+      setAssignFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadTasks();
       if (historyModalOrder?.id === updatedId) {
         await refreshOrderInHistory(updatedId);
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to assign shipment');
+      const errMsg = err.response?.data?.detail || err.response?.data?.error || 'Failed to assign shipment';
+      setAssignFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     } finally {
       setSubmittingAssign(false);
     }
@@ -338,14 +350,19 @@ export const DeliveriesPage: React.FC = () => {
     if (!rejectModalOrder) return;
     try {
       setSubmittingReject(true);
-      await apiClient.post(`/deliveries/${rejectModalOrder.id}/reject`, {
+      setRejectFeedback(null);
+      const res = await apiClient.post(`/deliveries/${rejectModalOrder.id}/reject`, {
         reason: rejectReason || 'Rejected by business owner',
       });
-      setRejectModalOrder(null);
+      const msg = res.data?.message || `Order ${rejectModalOrder.order_number || ''} rejected.`;
       setRejectReason('');
+      setRejectFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadTasks();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to reject order');
+      const errMsg = err.response?.data?.detail || err.response?.data?.error || 'Failed to reject order';
+      setRejectFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     } finally {
       setSubmittingReject(false);
     }
@@ -356,6 +373,7 @@ export const DeliveriesPage: React.FC = () => {
     setHistoryModalOrder(order);
     setHistoryTab('shipments');
     setShowQuickPay(false);
+    setQuickPayFeedback(null);
     setPayAmount(order.unpaid_amount || 0);
     setPayRefId('');
     setPayNotes('');
@@ -364,6 +382,7 @@ export const DeliveriesPage: React.FC = () => {
 
   const closeHistoryModal = () => {
     setHistoryModalOrder(null);
+    setQuickPayFeedback(null);
     if (searchParams.has('orderId')) {
       searchParams.delete('orderId');
       setSearchParams(searchParams, { replace: true });
@@ -375,7 +394,8 @@ export const DeliveriesPage: React.FC = () => {
     if (!historyModalOrder || payAmount <= 0) return;
     try {
       setSavingPayment(true);
-      await apiClient.post('/invoices/payments', {
+      setQuickPayFeedback(null);
+      const res = await apiClient.post('/invoices/payments', {
         customer_id: historyModalOrder.customer_id,
         order_id: historyModalOrder.id,
         invoice_id: historyModalOrder.invoice_id || undefined,
@@ -385,12 +405,17 @@ export const DeliveriesPage: React.FC = () => {
         payment_ref_id: payRefId || undefined,
         notes: payNotes || `Payment recorded for ${historyModalOrder.order_number || 'order'}`,
       });
+      const msg = `Payment ${res.data?.payment_number || ''} of ₹${payAmount.toFixed(2)} recorded for ${historyModalOrder.order_number || 'order'}.`;
       setShowQuickPay(false);
       setPayRefId('');
       setPayNotes('');
+      setQuickPayFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await Promise.all([refreshOrderInHistory(historyModalOrder.id), loadTasks()]);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to record order payment');
+      const errMsg = err.response?.data?.detail || 'Failed to record order payment';
+      setQuickPayFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     } finally {
       setSavingPayment(false);
     }
@@ -423,13 +448,16 @@ export const DeliveriesPage: React.FC = () => {
     e.preventDefault();
     if (!newCustomerId || !newProductId || newQty <= 0) return;
     if (totalInitialShippedQty > newQty) {
-      alert(`Assigned shipment quantity (${totalInitialShippedQty}) exceeds order quantity (${newQty}).`);
+      const errMsg = `Assigned shipment quantity (${totalInitialShippedQty}) exceeds order quantity (${newQty}).`;
+      setCreateOrderFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
       return;
     }
 
     try {
       setCreatingOrder(true);
-      await apiClient.post('/deliveries/orders', {
+      setCreateOrderFeedback(null);
+      const res = await apiClient.post('/deliveries/orders', {
         customer_id: newCustomerId,
         product_id: newProductId,
         expected_qty: newQty,
@@ -448,16 +476,20 @@ export const DeliveriesPage: React.FC = () => {
             notes: r.notes || undefined,
           })),
       });
-      setIsCreateOrderOpen(false);
+      const msg = `Order ${res.data?.order_number || ''} created with invoice ${res.data?.invoice_number || ''}!`;
       setNewNotes('');
       setUpfrontPayAmount(0);
       setUpfrontPayRef('');
       setInitialShipments([]);
       setSelectedDate(newScheduledDate);
       setAllDatesMode(false);
+      setCreateOrderFeedback({ type: 'success', message: msg });
+      showSnackbar(msg, 'success');
       await loadTasks();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to create order');
+      const errMsg = err.response?.data?.detail || err.response?.data?.error || 'Failed to create order';
+      setCreateOrderFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
     } finally {
       setCreatingOrder(false);
     }
@@ -523,7 +555,10 @@ export const DeliveriesPage: React.FC = () => {
         {/* Controls */}
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => setIsCreateOrderOpen(true)}
+            onClick={() => {
+              setCreateOrderFeedback(null);
+              setIsCreateOrderOpen(true);
+            }}
             className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
           >
             <Plus className="w-4 h-4" />
@@ -749,6 +784,7 @@ export const DeliveriesPage: React.FC = () => {
                         onClick={() => {
                           setRejectModalOrder(t);
                           setRejectReason('');
+                          setRejectFeedback(null);
                         }}
                         className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition inline-flex items-center space-x-1"
                       >
@@ -807,103 +843,146 @@ export const DeliveriesPage: React.FC = () => {
                   {assignModalOrder.customer_name} • {assignModalOrder.product_name}
                 </p>
               </div>
-              <button onClick={() => setAssignModalOrder(null)} className="text-slate-400 hover:text-slate-600">
+              <button
+                onClick={() => {
+                  setAssignModalOrder(null);
+                  setAssignFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 grid grid-cols-3 gap-2 text-center text-xs">
-              <div>
-                <div className="text-slate-400 text-[10px]">Ordered</div>
-                <div className="font-bold text-slate-900 font-mono">{assignModalOrder.expected_qty} Jars</div>
+            {assignFeedback && (
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                  assignFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {assignFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium">{assignFeedback.message}</div>
               </div>
-              <div>
-                <div className="text-slate-400 text-[10px]">Unassigned</div>
-                <div className="font-bold text-brand-700 font-mono">{assignModalOrder.remaining_assignable_qty} Jars</div>
-              </div>
-              <div>
-                <div className="text-slate-400 text-[10px]">Unpaid Left</div>
-                <div className="font-bold text-rose-700 font-mono">₹{assignModalOrder.unpaid_amount.toFixed(2)}</div>
-              </div>
-            </div>
+            )}
 
-            <form onSubmit={handleAssignShipment} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Select Delivery Driver</label>
-                <select
-                  required
-                  value={assignDriverId}
-                  onChange={(e) => setAssignDriverId(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white focus:outline-none focus:border-brand-500"
-                >
-                  <option value="" disabled>-- Choose Driver --</option>
-                  {drivers.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} ({d.phone})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Jars to Send (Max {assignModalOrder.remaining_assignable_qty})
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max={assignModalOrder.remaining_assignable_qty}
-                    required
-                    value={assignQty}
-                    onChange={(e) => handleAssignQtyChange(parseInt(e.target.value, 10) || 1)}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Amount Driver Collects (₹)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    required
-                    value={assignCollectAmount}
-                    onChange={(e) => setAssignCollectAmount(parseFloat(e.target.value) || 0)}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Instructions for Driver (Optional)</label>
-                <input
-                  type="text"
-                  value={assignNotes}
-                  onChange={(e) => setAssignNotes(e.target.value)}
-                  placeholder="e.g. Collect empty jars from gate, deliver to 2nd floor"
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
-                />
-              </div>
-
-              <div className="flex justify-end space-x-2 pt-3 border-t">
+            {assignFeedback?.type === 'success' ? (
+              <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setAssignModalOrder(null)}
-                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  onClick={() => {
+                    setAssignModalOrder(null);
+                    setAssignFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingAssign}
-                  className="px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
-                >
-                  {submittingAssign ? 'Assigning...' : 'Confirm & Dispatch Shipment'}
+                  Done
                 </button>
               </div>
-            </form>
+            ) : (
+              <>
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 grid grid-cols-3 gap-2 text-center text-xs">
+                  <div>
+                    <div className="text-slate-400 text-[10px]">Ordered</div>
+                    <div className="font-bold text-slate-900 font-mono">{assignModalOrder.expected_qty} Jars</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400 text-[10px]">Unassigned</div>
+                    <div className="font-bold text-brand-700 font-mono">{assignModalOrder.remaining_assignable_qty} Jars</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-400 text-[10px]">Unpaid Left</div>
+                    <div className="font-bold text-rose-700 font-mono">₹{assignModalOrder.unpaid_amount.toFixed(2)}</div>
+                  </div>
+                </div>
+
+                <form onSubmit={handleAssignShipment} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Select Delivery Driver</label>
+                    <select
+                      required
+                      value={assignDriverId}
+                      onChange={(e) => setAssignDriverId(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white focus:outline-none focus:border-brand-500"
+                    >
+                      <option value="" disabled>-- Choose Driver --</option>
+                      {drivers.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name} ({d.phone})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Jars to Send (Max {assignModalOrder.remaining_assignable_qty})
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max={assignModalOrder.remaining_assignable_qty}
+                        required
+                        value={assignQty}
+                        onChange={(e) => handleAssignQtyChange(parseInt(e.target.value, 10) || 1)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Amount Driver Collects (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        required
+                        value={assignCollectAmount}
+                        onChange={(e) => setAssignCollectAmount(parseFloat(e.target.value) || 0)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Instructions for Driver (Optional)</label>
+                    <input
+                      type="text"
+                      value={assignNotes}
+                      onChange={(e) => setAssignNotes(e.target.value)}
+                      placeholder="e.g. Collect empty jars from gate, deliver to 2nd floor"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                    />
+                  </div>
+
+                  <div className="flex justify-end space-x-2 pt-3 border-t">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAssignModalOrder(null);
+                        setAssignFeedback(null);
+                      }}
+                      className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingAssign}
+                      className="px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+                    >
+                      {submittingAssign ? 'Assigning...' : 'Confirm & Dispatch Shipment'}
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -920,35 +999,71 @@ export const DeliveriesPage: React.FC = () => {
             <p className="text-xs text-slate-500 mb-4">
               {rejectModalOrder.customer_name} • {rejectModalOrder.expected_qty} x {rejectModalOrder.product_name}
             </p>
-            <form onSubmit={handleRejectOrder} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Rejection Reason</label>
-                <textarea
-                  rows={3}
-                  required
-                  value={rejectReason}
-                  onChange={(e) => setRejectReason(e.target.value)}
-                  placeholder="e.g. Outside delivery zone, stock unavailable for evening slot"
-                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
-                />
+
+            {rejectFeedback && (
+              <div
+                className={`mb-4 p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                  rejectFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {rejectFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium">{rejectFeedback.message}</div>
               </div>
-              <div className="flex justify-end space-x-2 pt-2">
+            )}
+
+            {rejectFeedback?.type === 'success' ? (
+              <div className="flex justify-end pt-2">
                 <button
                   type="button"
-                  onClick={() => setRejectModalOrder(null)}
-                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  onClick={() => {
+                    setRejectModalOrder(null);
+                    setRejectFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold shadow-sm transition"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingReject}
-                  className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
-                >
-                  {submittingReject ? 'Rejecting...' : 'Reject Order'}
+                  Done
                 </button>
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleRejectOrder} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Rejection Reason</label>
+                  <textarea
+                    rows={3}
+                    required
+                    value={rejectReason}
+                    onChange={(e) => setRejectReason(e.target.value)}
+                    placeholder="e.g. Outside delivery zone, stock unavailable for evening slot"
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+                <div className="flex justify-end space-x-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRejectModalOrder(null);
+                      setRejectFeedback(null);
+                    }}
+                    className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingReject}
+                    className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+                  >
+                    {submittingReject ? 'Rejecting...' : 'Reject Order'}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -1151,6 +1266,24 @@ export const DeliveriesPage: React.FC = () => {
                     </div>
                   </div>
 
+                  {/* Quick Record Order Payment Feedback */}
+                  {quickPayFeedback && (
+                    <div
+                      className={`p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                        quickPayFeedback.type === 'success'
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          : 'bg-rose-50 border-rose-200 text-rose-900'
+                      }`}
+                    >
+                      {quickPayFeedback.type === 'success' ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                      )}
+                      <div className="font-medium">{quickPayFeedback.message}</div>
+                    </div>
+                  )}
+
                   {/* Quick Record Order Payment Form */}
                   {showQuickPay && (
                     <form onSubmit={handleRecordOrderPayment} className="bg-brand-50/60 border border-brand-200 rounded-xl p-4 space-y-3">
@@ -1295,11 +1428,55 @@ export const DeliveriesPage: React.FC = () => {
                 <h3 className="font-bold text-base text-slate-900">Create New Order &amp; Assign Shipments</h3>
                 <p className="text-xs text-slate-500">Automatically generates the order invoice and splits delivery across one or more drivers</p>
               </div>
-              <button onClick={() => setIsCreateOrderOpen(false)} className="text-slate-400 hover:text-slate-600">
+              <button
+                onClick={() => {
+                  setIsCreateOrderOpen(false);
+                  setCreateOrderFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            {createOrderFeedback && (
+              <div
+                className={`mb-4 p-3.5 rounded-xl border text-xs flex items-start space-x-2.5 ${
+                  createOrderFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {createOrderFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium">{createOrderFeedback.message}</div>
+              </div>
+            )}
+
+            {createOrderFeedback?.type === 'success' ? (
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCreateOrderFeedback(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Create Another Order
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCreateOrderOpen(false);
+                    setCreateOrderFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
             <form onSubmit={handleCreateOrder} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -1511,7 +1688,10 @@ export const DeliveriesPage: React.FC = () => {
               <div className="flex justify-end space-x-2 pt-3 border-t">
                 <button
                   type="button"
-                  onClick={() => setIsCreateOrderOpen(false)}
+                  onClick={() => {
+                    setIsCreateOrderOpen(false);
+                    setCreateOrderFeedback(null);
+                  }}
                   className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
                 >
                   Cancel
@@ -1525,6 +1705,7 @@ export const DeliveriesPage: React.FC = () => {
                 </button>
               </div>
             </form>
+            )}
           </div>
         </div>
       )}

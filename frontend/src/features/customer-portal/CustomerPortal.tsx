@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSnackbar } from '@/contexts/SnackbarContext';
 import {
   Droplet,
   Truck,
@@ -147,6 +148,7 @@ interface ServiceTicket {
 export const CustomerPortal: React.FC = () => {
   const navigate = useNavigate();
   const { logout } = useAuth();
+  const { showSnackbar } = useSnackbar();
 
   const handleLogout = () => {
     logout();
@@ -194,6 +196,14 @@ export const CustomerPortal: React.FC = () => {
   const [payAmount, setPayAmount] = useState(0);
   const [payMethod, setPayMethod] = useState('upi');
 
+  // Inline Popup Feedback States
+  const [extraOrderFeedback, setExtraOrderFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [submittingExtraOrder, setSubmittingExtraOrder] = useState(false);
+  const [requestFeedback, setRequestFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [submittingRequest, setSubmittingRequest] = useState(false);
+  const [payDuesFeedback, setPayDuesFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [submittingPayDues, setSubmittingPayDues] = useState(false);
+
   const fetchPortalData = async () => {
     try {
       setLoading(true);
@@ -227,6 +237,8 @@ export const CustomerPortal: React.FC = () => {
   const handleOrderExtra = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      setSubmittingExtraOrder(true);
+      setExtraOrderFeedback(null);
       const res = await apiClient.post('/portal/order-extra', {
         quantity: extraQuantity,
         delivery_date: extraDate,
@@ -235,46 +247,66 @@ export const CustomerPortal: React.FC = () => {
         pay_now_amount: extraPayNow || 0,
         payment_method: 'upi',
       });
-      setIsOrderExtraOpen(false);
+      const successMsg =
+        res.data?.message || `Order request for ${extraQuantity} water jars submitted for owner approval.`;
       setExtraNotes('');
       setExtraPayNow(0);
-      alert(res.data?.message || `Order request for ${extraQuantity} water jars submitted for owner approval.`);
+      setExtraOrderFeedback({ type: 'success', message: successMsg });
+      showSnackbar(successMsg, 'success');
       await fetchPortalData();
     } catch (err: any) {
-      alert(err.response?.data?.detail?.message || 'Failed to place extra order');
+      const errMsg = err.response?.data?.detail?.message || err.response?.data?.detail || 'Failed to place extra order';
+      setExtraOrderFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
+    } finally {
+      setSubmittingExtraOrder(false);
     }
   };
 
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await apiClient.post('/portal/request', {
+      setSubmittingRequest(true);
+      setRequestFeedback(null);
+      const res = await apiClient.post('/portal/request', {
         category: requestCategory,
         title: requestTitle,
         description: requestDesc,
       });
-      setIsRequestModalOpen(false);
+      const successMsg = res.data?.message || 'Request submitted! Your water agency supervisor has been notified.';
       setRequestTitle('');
       setRequestDesc('');
-      alert('Request submitted! Your water agency supervisor has been notified.');
+      setRequestFeedback({ type: 'success', message: successMsg });
+      showSnackbar(successMsg, 'success');
       await fetchPortalData();
     } catch (err: any) {
-      alert(err.response?.data?.detail?.message || 'Failed to submit request');
+      const errMsg = err.response?.data?.detail?.message || err.response?.data?.detail || 'Failed to submit request';
+      setRequestFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
+    } finally {
+      setSubmittingRequest(false);
     }
   };
 
   const handlePayDues = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      setSubmittingPayDues(true);
+      setPayDuesFeedback(null);
       const res = await apiClient.post('/portal/pay', {
         amount: payAmount,
         payment_method: payMethod,
       });
-      setIsPayDuesOpen(false);
-      alert(res.data.message || 'Payment successfully credited to your ledger!');
+      const successMsg = res.data?.message || 'Payment successfully credited to your ledger!';
+      setPayDuesFeedback({ type: 'success', message: successMsg });
+      showSnackbar(successMsg, 'success');
       await fetchPortalData();
     } catch (err: any) {
-      alert('Payment processing failed');
+      const errMsg = err.response?.data?.detail || 'Payment processing failed';
+      setPayDuesFeedback({ type: 'error', message: errMsg });
+      showSnackbar(errMsg, 'error');
+    } finally {
+      setSubmittingPayDues(false);
     }
   };
 
@@ -859,96 +891,146 @@ export const CustomerPortal: React.FC = () => {
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 space-y-4">
             <div className="flex justify-between items-center pb-2 border-b">
               <h3 className="font-bold text-base text-slate-900">Order Extra Water Jars</h3>
-              <button onClick={() => setIsOrderExtraOpen(false)} className="text-slate-400">
+              <button
+                onClick={() => {
+                  setIsOrderExtraOpen(false);
+                  setExtraOrderFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handleOrderExtra} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Number of 20L Jars</label>
-                <div className="flex items-center space-x-3">
-                  <button
-                    type="button"
-                    onClick={() => setExtraQuantity(Math.max(1, extraQuantity - 1))}
-                    className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-700"
-                  >
-                    -
-                  </button>
-                  <span className="text-lg font-bold font-mono text-slate-900">{extraQuantity} Jars</span>
-                  <button
-                    type="button"
-                    onClick={() => setExtraQuantity(extraQuantity + 1)}
-                    className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-700"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Preferred Delivery Date</label>
-                <input
-                  type="date"
-                  required
-                  value={extraDate}
-                  onChange={(e) => setExtraDate(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
-                />
+            {extraOrderFeedback && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs flex items-start space-x-2.5 ${
+                  extraOrderFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {extraOrderFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium leading-relaxed">{extraOrderFeedback.message}</div>
               </div>
+            )}
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Preferred Delivery Shift</label>
-                <select
-                  value={extraShift}
-                  onChange={(e) => setExtraShift(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
-                >
-                  <option value="morning">Morning Shift (06:00 AM - 10:00 AM)</option>
-                  <option value="afternoon">Afternoon Shift (11:00 AM - 02:00 PM)</option>
-                  <option value="evening">Evening Shift (04:00 PM - 08:00 PM)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Special Drop-off Note (Optional)</label>
-                <input
-                  type="text"
-                  value={extraNotes}
-                  onChange={(e) => setExtraNotes(e.target.value)}
-                  placeholder="e.g. Leave with security guard"
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Pay Now While Ordering (₹ Optional UPI)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  value={extraPayNow}
-                  onChange={(e) => setExtraPayNow(parseFloat(e.target.value) || 0)}
-                  placeholder="0 (Pay later / at delivery)"
-                  className="w-full px-3 py-2 border rounded-lg text-sm font-mono"
-                />
-              </div>
-
+            {extraOrderFeedback?.type === 'success' ? (
               <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsOrderExtraOpen(false)}
-                  className="px-4 py-2 border rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  onClick={() => setExtraOrderFeedback(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50"
                 >
-                  Cancel
+                  Place Another Order
                 </button>
                 <button
-                  type="submit"
-                  className="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-xs font-bold shadow-sm"
+                  type="button"
+                  onClick={() => {
+                    setIsOrderExtraOpen(false);
+                    setExtraOrderFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm"
                 >
-                  Confirm Extra Order
+                  Done
                 </button>
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleOrderExtra} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Number of 20L Jars</label>
+                  <div className="flex items-center space-x-3">
+                    <button
+                      type="button"
+                      onClick={() => setExtraQuantity(Math.max(1, extraQuantity - 1))}
+                      className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-700"
+                    >
+                      -
+                    </button>
+                    <span className="text-lg font-bold font-mono text-slate-900">{extraQuantity} Jars</span>
+                    <button
+                      type="button"
+                      onClick={() => setExtraQuantity(extraQuantity + 1)}
+                      className="w-9 h-9 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-700"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Preferred Delivery Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={extraDate}
+                    onChange={(e) => setExtraDate(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Preferred Delivery Shift</label>
+                  <select
+                    value={extraShift}
+                    onChange={(e) => setExtraShift(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+                  >
+                    <option value="morning">Morning Shift (06:00 AM - 10:00 AM)</option>
+                    <option value="afternoon">Afternoon Shift (11:00 AM - 02:00 PM)</option>
+                    <option value="evening">Evening Shift (04:00 PM - 08:00 PM)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Special Drop-off Note (Optional)</label>
+                  <input
+                    type="text"
+                    value={extraNotes}
+                    onChange={(e) => setExtraNotes(e.target.value)}
+                    placeholder="e.g. Leave with security guard"
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Pay Now While Ordering (₹ Optional UPI)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={extraPayNow}
+                    onChange={(e) => setExtraPayNow(parseFloat(e.target.value) || 0)}
+                    placeholder="0 (Pay later / at delivery)"
+                    className="w-full px-3 py-2 border rounded-lg text-sm font-mono"
+                  />
+                </div>
+
+                <div className="flex justify-end space-x-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsOrderExtraOpen(false);
+                      setExtraOrderFeedback(null);
+                    }}
+                    className="px-4 py-2 border rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingExtraOrder}
+                    className="px-4 py-2 bg-brand-500 hover:bg-brand-600 disabled:opacity-60 text-white rounded-lg text-xs font-bold shadow-sm"
+                  >
+                    {submittingExtraOrder ? 'Submitting...' : 'Confirm Extra Order'}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -959,67 +1041,117 @@ export const CustomerPortal: React.FC = () => {
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100 space-y-4">
             <div className="flex justify-between items-center pb-2 border-b">
               <h3 className="font-bold text-base text-slate-900">Raise Request or Report Issue</h3>
-              <button onClick={() => setIsRequestModalOpen(false)} className="text-slate-400">
+              <button
+                onClick={() => {
+                  setIsRequestModalOpen(false);
+                  setRequestFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handleSubmitRequest} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Request Category</label>
-                <select
-                  value={requestCategory}
-                  onChange={(e) => setRequestCategory(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
-                >
-                  <option value="extra_water">Urgent Extra Water Needed</option>
-                  <option value="vacation_pause">Vacation Schedule Pause</option>
-                  <option value="jar_leakage">Jar Leakage / Damaged Container</option>
-                  <option value="damaged_seal">Cap Seal Broken / Quality Concern</option>
-                  <option value="timing_issue">Delivery Delayed / Shift Change</option>
-                  <option value="billing_inquiry">Invoice or Ledger Balance Query</option>
-                </select>
-              </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Subject / Summary</label>
-                <input
-                  type="text"
-                  required
-                  value={requestTitle}
-                  onChange={(e) => setRequestTitle(e.target.value)}
-                  placeholder="Brief summary of request..."
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
-                />
+            {requestFeedback && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs flex items-start space-x-2.5 ${
+                  requestFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
+              >
+                {requestFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium leading-relaxed">{requestFeedback.message}</div>
               </div>
+            )}
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Details & Description</label>
-                <textarea
-                  rows={3}
-                  required
-                  value={requestDesc}
-                  onChange={(e) => setRequestDesc(e.target.value)}
-                  placeholder="Explain any details for the plant dispatcher..."
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
-                />
-              </div>
-
+            {requestFeedback?.type === 'success' ? (
               <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsRequestModalOpen(false)}
-                  className="px-4 py-2 border rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  onClick={() => setRequestFeedback(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50"
                 >
-                  Cancel
+                  Submit Another
                 </button>
                 <button
-                  type="submit"
-                  className="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-xs font-bold shadow-sm"
+                  type="button"
+                  onClick={() => {
+                    setIsRequestModalOpen(false);
+                    setRequestFeedback(null);
+                  }}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm"
                 >
-                  Submit Request
+                  Done
                 </button>
               </div>
-            </form>
+            ) : (
+              <form onSubmit={handleSubmitRequest} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Request Category</label>
+                  <select
+                    value={requestCategory}
+                    onChange={(e) => setRequestCategory(e.target.value)}
+                    className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+                  >
+                    <option value="extra_water">Urgent Extra Water Needed</option>
+                    <option value="vacation_pause">Vacation Schedule Pause</option>
+                    <option value="jar_leakage">Jar Leakage / Damaged Container</option>
+                    <option value="damaged_seal">Cap Seal Broken / Quality Concern</option>
+                    <option value="timing_issue">Delivery Delayed / Shift Change</option>
+                    <option value="billing_inquiry">Invoice or Ledger Balance Query</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Subject / Summary</label>
+                  <input
+                    type="text"
+                    required
+                    value={requestTitle}
+                    onChange={(e) => setRequestTitle(e.target.value)}
+                    placeholder="Brief summary of request..."
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Details &amp; Description</label>
+                  <textarea
+                    rows={3}
+                    required
+                    value={requestDesc}
+                    onChange={(e) => setRequestDesc(e.target.value)}
+                    placeholder="Explain any details for the plant dispatcher..."
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+
+                <div className="flex justify-end space-x-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsRequestModalOpen(false);
+                      setRequestFeedback(null);
+                    }}
+                    className="px-4 py-2 border rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submittingRequest}
+                    className="px-4 py-2 bg-brand-500 hover:bg-brand-600 disabled:opacity-60 text-white rounded-lg text-xs font-bold shadow-sm"
+                  >
+                    {submittingRequest ? 'Submitting...' : 'Submit Request'}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -1083,61 +1215,101 @@ export const CustomerPortal: React.FC = () => {
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-100 space-y-4">
             <div className="flex justify-between items-center pb-2 border-b">
               <h3 className="font-bold text-base text-slate-900">Pay Outstanding Dues</h3>
-              <button onClick={() => setIsPayDuesOpen(false)} className="text-slate-400">
+              <button
+                onClick={() => {
+                  setIsPayDuesOpen(false);
+                  setPayDuesFeedback(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handlePayDues} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Amount to Pay (₹)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 text-slate-400 font-bold">₹</span>
-                  <input
-                    type="number"
-                    min="1"
-                    required
-                    value={payAmount}
-                    onChange={(e) => setPayAmount(parseFloat(e.target.value) || 0)}
-                    className="w-full pl-8 pr-3 py-2 border rounded-lg text-sm font-bold font-mono text-slate-900"
-                  />
-                </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Select Payment Method</label>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setPayMethod('upi')}
-                    className={`p-2.5 border rounded-xl text-center font-semibold transition ${
-                      payMethod === 'upi' ? 'border-brand-500 bg-brand-50/50 text-brand-700' : 'border-slate-200'
-                    }`}
-                  >
-                    UPI / QR Code
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPayMethod('card')}
-                    className={`p-2.5 border rounded-xl text-center font-semibold transition ${
-                      payMethod === 'card' ? 'border-brand-500 bg-brand-50/50 text-brand-700' : 'border-slate-200'
-                    }`}
-                  >
-                    Debit / Credit Card
-                  </button>
-                </div>
-              </div>
-
-              <div className="p-3 bg-slate-50 rounded-xl border text-center text-xs text-slate-500">
-                Payment reconciles instantly with your water supplier ledger.
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md transition"
+            {payDuesFeedback && (
+              <div
+                className={`p-3.5 rounded-xl border text-xs flex items-start space-x-2.5 ${
+                  payDuesFeedback.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-rose-50 border-rose-200 text-rose-900'
+                }`}
               >
-                Pay ₹{payAmount.toFixed(2)} & Reconcile Account
-              </button>
-            </form>
+                {payDuesFeedback.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                )}
+                <div className="font-medium leading-relaxed">{payDuesFeedback.message}</div>
+              </div>
+            )}
+
+            {payDuesFeedback?.type === 'success' ? (
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPayDuesOpen(false);
+                    setPayDuesFeedback(null);
+                  }}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md transition"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handlePayDues} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Amount to Pay (₹)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2.5 text-slate-400 font-bold">₹</span>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={payAmount}
+                      onChange={(e) => setPayAmount(parseFloat(e.target.value) || 0)}
+                      className="w-full pl-8 pr-3 py-2 border rounded-lg text-sm font-bold font-mono text-slate-900"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Select Payment Method</label>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setPayMethod('upi')}
+                      className={`p-2.5 border rounded-xl text-center font-semibold transition ${
+                        payMethod === 'upi' ? 'border-brand-500 bg-brand-50/50 text-brand-700' : 'border-slate-200'
+                      }`}
+                    >
+                      UPI / QR Code
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPayMethod('card')}
+                      className={`p-2.5 border rounded-xl text-center font-semibold transition ${
+                        payMethod === 'card' ? 'border-brand-500 bg-brand-50/50 text-brand-700' : 'border-slate-200'
+                      }`}
+                    >
+                      Debit / Credit Card
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded-xl border text-center text-xs text-slate-500">
+                  Payment reconciles instantly with your water supplier ledger.
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={submittingPayDues}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold shadow-md transition"
+                >
+                  {submittingPayDues ? 'Processing...' : `Pay ₹${payAmount.toFixed(2)} & Reconcile Account`}
+                </button>
+              </form>
+            )}
           </div>
         </div>
       )}
