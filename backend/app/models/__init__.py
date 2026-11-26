@@ -29,6 +29,7 @@ from app.models.delivery import (
     Subscription,
     DeliveryTask,
     DeliveryRecord,
+    DeliveryShipment,
 )
 from app.models.finance import (
     Invoice,
@@ -69,6 +70,7 @@ __all__ = [
     "Subscription",
     "DeliveryTask",
     "DeliveryRecord",
+    "DeliveryShipment",
     "Invoice",
     "InvoiceItem",
     "Payment",

@@ -56,6 +56,104 @@ class SubscriptionResponse(SubscriptionBase):
         from_attributes = True
 
 
+class ShipmentSummaryResponse(BaseModel):
+    id: uuid.UUID
+    shipment_number: str
+    order_id: uuid.UUID
+    driver_id: Optional[uuid.UUID] = None
+    driver_name: Optional[str] = None
+    driver_phone: Optional[str] = None
+    scheduled_date: date
+    shift: str
+    assigned_qty: int
+    delivered_qty: int = 0
+    empty_collected_qty: int = 0
+    amount_to_collect: float = 0.0
+    cash_collected: float = 0.0
+    payment_mode: str = "unpaid"
+    status: str
+    delivered_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    failure_reason: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class OrderPaymentSummary(BaseModel):
+    id: uuid.UUID
+    payment_number: str
+    amount: float
+    payment_method: str
+    payment_ref_id: Optional[str] = None
+    payment_stage: str = "later"
+    status: str
+    payment_date: datetime
+    notes: Optional[str] = None
+    shipment_id: Optional[uuid.UUID] = None
+    collector_name: Optional[str] = None
+
+
+class AssignShipmentRequest(BaseModel):
+    driver_id: uuid.UUID
+    assigned_qty: int
+    amount_to_collect: Optional[float] = None
+    scheduled_date: Optional[date] = None
+    shift: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RejectOrderRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class OwnerOrderCreateRequest(BaseModel):
+    customer_id: uuid.UUID
+    product_id: uuid.UUID
+    expected_qty: int
+    scheduled_date: date
+    shift: str = "morning"
+    notes: Optional[str] = None
+    initial_payment_amount: float = 0.0
+    initial_payment_method: str = "cash"
+    initial_payment_ref: Optional[str] = None
+    shipments: Optional[List[AssignShipmentRequest]] = None
+
+
+class CompleteShipmentRequest(BaseModel):
+    delivered_qty: int
+    empty_collected_qty: int
+    cash_collected: float = 0.0
+    payment_mode: str = "unpaid"
+    delivery_status: str = "delivered"  # delivered, failed
+    failure_reason: Optional[str] = None
+    notes: Optional[str] = None
+    client_tx_id: Optional[str] = None
+
+
+class DriverShipmentResponse(BaseModel):
+    """Driver-facing shipment payload: intentionally excludes jar unit prices and customer financial dues."""
+    id: uuid.UUID
+    shipment_number: str
+    order_id: uuid.UUID
+    order_number: Optional[str] = None
+    customer_id: uuid.UUID
+    customer_name: str
+    customer_phone: str
+    customer_address: str
+    delivery_instructions: Optional[str] = None
+    customer_jar_balance: int = 0
+    product_name: str
+    assigned_qty: int
+    order_total_qty: int
+    amount_to_collect: float = 0.0
+    scheduled_date: date
+    shift: str
+    status: str
+    notes: Optional[str] = None
+
+
 class DeliveryTaskResponse(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -72,6 +170,19 @@ class DeliveryTaskResponse(BaseModel):
     customer_balance: Optional[float] = 0.0
     product_name: Optional[str] = None
     product_price: Optional[float] = 40.0
+    order_number: Optional[str] = None
+    source: Optional[str] = "subscription"
+    rejection_reason: Optional[str] = None
+    notes: Optional[str] = None
+    unit_price: Optional[float] = 0.0
+    total_amount: float = 0.0
+    paid_amount: float = 0.0
+    unpaid_amount: float = 0.0
+    invoice_id: Optional[uuid.UUID] = None
+    invoice_number: Optional[str] = None
+    assigned_qty_total: int = 0
+    delivered_qty_total: int = 0
+    remaining_assignable_qty: int = 0
     scheduled_date: date
     shift: str
     expected_qty: int
@@ -84,6 +195,8 @@ class DeliveryTaskResponse(BaseModel):
     payment_mode: Optional[str] = None
     delivered_at: Optional[datetime] = None
     delivery_notes: Optional[str] = None
+    shipments: List[ShipmentSummaryResponse] = []
+    payments: List[OrderPaymentSummary] = []
 
     class Config:
         from_attributes = True

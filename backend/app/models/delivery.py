@@ -60,8 +60,15 @@ class DeliveryTask(TenantAwareModel):
     shift = Column(String(50), default="morning", nullable=False)
     expected_qty = Column(Integer, default=1, nullable=False)
 
+    order_number = Column(String(50), nullable=True, index=True)
+    unit_price = Column(Float, nullable=True)
+    total_amount = Column(Float, default=0.0, nullable=False)
+    rejection_reason = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    source = Column(String(30), default="subscription", nullable=False)  # customer_request, owner_created, subscription
+
     status = Column(String(50), default="pending", nullable=False, index=True)
-    # pending, in_transit, completed, partially_completed, failed, cancelled
+    # requested, rejected, pending, assigned, in_transit, completed, partially_completed, failed, cancelled
     sequence_order = Column(Integer, default=0, nullable=False)
     idempotency_key = Column(String(255), unique=True, nullable=False, index=True)
 
@@ -69,6 +76,47 @@ class DeliveryTask(TenantAwareModel):
     product = relationship("Product")
     driver = relationship("User")
     delivery_record = relationship("DeliveryRecord", back_populates="task", uselist=False, cascade="all, delete-orphan")
+    shipments = relationship(
+        "DeliveryShipment",
+        back_populates="order",
+        cascade="all, delete-orphan",
+        order_by="DeliveryShipment.created_at.asc()"
+    )
+    invoice = relationship("Invoice", back_populates="order", uselist=False)
+    payments = relationship("Payment", back_populates="order", order_by="Payment.payment_date.desc()")
+
+
+class DeliveryShipment(TenantAwareModel):
+    __tablename__ = "delivery_shipments"
+
+    order_id = Column(GUID(), ForeignKey("delivery_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    driver_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(GUID(), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False)
+    branch_id = Column(GUID(), ForeignKey("branches.id", ondelete="CASCADE"), nullable=False)
+
+    shipment_number = Column(String(50), nullable=False, index=True)
+    scheduled_date = Column(Date, default=date.today, nullable=False, index=True)
+    shift = Column(String(50), default="morning", nullable=False)
+
+    assigned_qty = Column(Integer, default=1, nullable=False)
+    delivered_qty = Column(Integer, default=0, nullable=False)
+    empty_collected_qty = Column(Integer, default=0, nullable=False)
+    amount_to_collect = Column(Float, default=0.0, nullable=False)
+    cash_collected = Column(Float, default=0.0, nullable=False)
+    payment_mode = Column(String(50), default="unpaid", nullable=False)  # unpaid, cash, upi, qr_scan
+
+    status = Column(String(50), default="assigned", nullable=False, index=True)
+    # assigned, in_transit, completed, partially_completed, failed, cancelled
+    failure_reason = Column(String(255), nullable=True)
+    notes = Column(Text, nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    client_tx_id = Column(String(128), unique=True, nullable=True, index=True)
+
+    order = relationship("DeliveryTask", back_populates="shipments")
+    driver = relationship("User")
+    customer = relationship("Customer")
+    product = relationship("Product")
 
 
 class DeliveryRecord(TenantAwareModel):

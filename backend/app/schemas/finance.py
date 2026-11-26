@@ -23,6 +23,7 @@ class InvoiceResponse(BaseModel):
     customer_id: uuid.UUID
     customer_name: Optional[str] = None
     branch_id: uuid.UUID
+    order_id: Optional[uuid.UUID] = None
     invoice_number: str
     billing_period_start: date
     billing_period_end: date
@@ -54,6 +55,9 @@ class InvoiceGenerateMonthlyRequest(BaseModel):
 class PaymentCreate(BaseModel):
     customer_id: uuid.UUID
     invoice_id: Optional[uuid.UUID] = None
+    order_id: Optional[uuid.UUID] = None
+    shipment_id: Optional[uuid.UUID] = None
+    payment_stage: str = "later"  # while_order, while_delivery, later
     amount: float
     payment_method: str = "cash"  # cash, upi, razorpay, bank_transfer, cheque
     payment_ref_id: Optional[str] = None
@@ -64,16 +68,53 @@ class PaymentResponse(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     customer_id: uuid.UUID
-    invoice_id: Optional[uuid.UUID]
+    invoice_id: Optional[uuid.UUID] = None
+    order_id: Optional[uuid.UUID] = None
+    shipment_id: Optional[uuid.UUID] = None
     payment_number: str
     amount: float
     payment_method: str
-    payment_ref_id: Optional[str]
+    payment_ref_id: Optional[str] = None
+    payment_stage: str = "later"
     status: str
     payment_date: datetime
+    notes: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class UniversalPaymentItem(BaseModel):
+    id: uuid.UUID
+    payment_number: str
+    payment_date: datetime
+    amount: float
+    payment_method: str
+    payment_ref_id: Optional[str] = None
+    payment_stage: str = "later"
+    status: str
+    notes: Optional[str] = None
+    customer_id: uuid.UUID
+    customer_name: str
+    customer_phone: Optional[str] = None
+    invoice_id: Optional[uuid.UUID] = None
+    invoice_number: Optional[str] = None
+    order_id: Optional[uuid.UUID] = None
+    order_number: Optional[str] = None
+    order_status: Optional[str] = None
+    order_expected_qty: Optional[int] = None
+    order_product_name: Optional[str] = None
+    order_scheduled_date: Optional[date] = None
+    collector_name: Optional[str] = None
+
+
+class PaginatedPaymentsResponse(BaseModel):
+    items: List[UniversalPaymentItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    total_amount_filtered: float
 
 
 class CustomerLedgerResponse(BaseModel):

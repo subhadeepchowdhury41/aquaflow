@@ -29,21 +29,25 @@ import {
   Minus
 } from 'lucide-react';
 
-interface Stop {
+interface DriverShipment {
   id: string;
+  shipment_number: string;
+  order_id: string;
+  order_number?: string;
   customer_id: string;
   customer_name: string;
   customer_phone: string;
   customer_address: string;
   delivery_instructions?: string;
-  customer_balance?: number;
+  customer_jar_balance: number;
   product_name: string;
-  product_price?: number;
-  expected_qty: number;
-  status: string;
+  assigned_qty: number;
+  order_total_qty: number;
+  amount_to_collect: number;
+  scheduled_date: string;
   shift: string;
-  driver_id?: string;
-  driver_name?: string;
+  status: string;
+  notes?: string;
 }
 
 interface CompletedShipment {
@@ -102,8 +106,8 @@ export const DriverPortal: React.FC = () => {
   // Bottom Navigation Tabs
   const [activeTab, setActiveTab] = useState<'active' | 'completed' | 'profile'>('active');
 
-  // Active Orders state
-  const [stops, setStops] = useState<Stop[]>([]);
+  // Active Shipments state
+  const [stops, setStops] = useState<DriverShipment[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -138,11 +142,12 @@ export const DriverPortal: React.FC = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
-  // Active Order Detail Drawer
-  const [activeStop, setActiveStop] = useState<Stop | null>(null);
+  // Active Shipment Detail Drawer
+  const [activeStop, setActiveStop] = useState<DriverShipment | null>(null);
   const [deliveredQty, setDeliveredQty] = useState(1);
   const [emptyQty, setEmptyQty] = useState(1);
   const [cashCollected, setCashCollected] = useState(0);
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'upi' | 'unpaid'>('unpaid');
   const [deliveryNotes, setDeliveryNotes] = useState('');
 
   // Save jars on van
@@ -168,14 +173,14 @@ export const DriverPortal: React.FC = () => {
     };
   }, []);
 
-  // Fetch active dispatch stops
+  // Fetch active assigned shipments
   const loadStops = async () => {
     try {
       setLoading(true);
-      const res = await apiClient.get('/deliveries/today');
+      const res = await apiClient.get('/deliveries/driver/shipments');
       setStops(res.data);
     } catch (err) {
-      console.error('Failed to load driver dispatch', err);
+      console.error('Failed to load driver shipments', err);
     } finally {
       setLoading(false);
     }
@@ -251,95 +256,85 @@ export const DriverPortal: React.FC = () => {
     }
   };
 
-  // Open order details modal
-  const openOrderDetails = (stop: Stop) => {
+  // Open shipment details modal — autofill jar amounts & amount to collect
+  const openOrderDetails = (stop: DriverShipment) => {
     setActiveStop(stop);
-    // Preset delivered quantity to min of expected qty and what's currently on the van
-    const defaultQty = Math.min(stop.expected_qty, Math.max(0, jarsOnVan));
-    setDeliveredQty(defaultQty > 0 ? defaultQty : stop.expected_qty);
-    setEmptyQty(stop.expected_qty);
-    setCashCollected(0);
+    setDeliveredQty(stop.assigned_qty);
+    setEmptyQty(stop.assigned_qty);
+    setCashCollected(stop.amount_to_collect || 0);
+    setPaymentMode((stop.amount_to_collect || 0) > 0 ? 'cash' : 'unpaid');
     setDeliveryNotes('');
   };
 
-  // Execute delivery confirmation
+  // Execute shipment completion
   const handleRecordStop = async () => {
     if (!activeStop) return;
 
-    // BUSINESS LOGIC RULE:
-    // If jars with driver < order required jars or delivered_qty < expected_qty,
-    // the status MUST NOT be 'completed'. It will be 'partially_completed'.
-    const isPartial = deliveredQty < activeStop.expected_qty;
+    const isPartial = deliveredQty < activeStop.assigned_qty;
+    const effectiveMode = cashCollected > 0 ? (paymentMode === 'unpaid' ? 'cash' : paymentMode) : 'unpaid';
 
     const payload = {
-      delivery_task_id: activeStop.id,
       delivered_qty: deliveredQty,
       empty_collected_qty: emptyQty,
       cash_collected: cashCollected,
-      payment_mode: cashCollected > 0 ? 'cash' : 'unpaid',
+      payment_mode: effectiveMode,
       delivery_status: 'delivered',
-      notes: deliveryNotes || (isPartial ? `Partial delivery: ${deliveredQty} of ${activeStop.expected_qty} jars delivered.` : undefined),
-      client_tx_id: `offline-tx-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+      notes: deliveryNotes || (isPartial ? `Partial delivery: ${deliveredQty} of ${activeStop.assigned_qty} jars delivered.` : undefined),
+      client_tx_id: `offline-shp-${Date.now()}-${Math.random().toString(36).substring(7)}`,
     };
 
     if (!isOnline) {
-      const updatedQueue = [...offlineQueue, payload];
+      const updatedQueue = [...offlineQueue, { ...payload, delivery_task_id: activeStop.order_id }];
       setOfflineQueue(updatedQueue);
       localStorage.setItem('aquaflow_driver_offline_queue', JSON.stringify(updatedQueue));
-      
-      // Update local state
-      setStops(stops.map(s => s.id === activeStop.id ? { 
-        ...s, 
-        status: isPartial ? 'partially_completed' : 'completed' 
-      } : s));
-      
-      // Deduct van jars
+
+      setStops(stops.filter((s) => s.id !== activeStop.id));
       updateJarsOnVan(Math.max(0, jarsOnVan - deliveredQty));
       setActiveStop(null);
-      alert('Delivery recorded offline. Will sync automatically when connected.');
+      alert('Shipment recorded offline. Will sync automatically when connected.');
       return;
     }
 
     try {
-      await apiClient.post('/deliveries/record', payload);
-      // Deduct delivered jars from van stock
+      await apiClient.post(`/deliveries/shipments/${activeStop.id}/complete`, payload);
       updateJarsOnVan(Math.max(0, jarsOnVan - deliveredQty));
       setActiveStop(null);
       await loadStops();
       if (activeTab === 'completed') loadCompletedShipments();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to record delivery');
+      alert(err.response?.data?.detail || 'Failed to record shipment');
     }
   };
 
-  // Reassign order to another driver
+  // Reassign shipment to another driver
   const handleReassignOrder = async () => {
     if (!activeStop || !targetColleagueId) return;
 
     try {
-      const res = await apiClient.post(`/deliveries/${activeStop.id}/reassign`, {
+      const res = await apiClient.post(`/deliveries/shipments/${activeStop.id}/reassign`, {
         new_driver_id: targetColleagueId,
         notes: reassignNotes || 'Reassigned from driver van'
       });
-      alert(res.data.message || 'Order successfully reassigned to another driver!');
+      alert(res.data.message || 'Shipment successfully reassigned to another driver!');
       setIsReassignModalOpen(false);
       setActiveStop(null);
       await loadStops();
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reassign order');
+      alert(err.response?.data?.detail || 'Failed to reassign shipment');
     }
   };
 
-  // Filtered active stops
+  // Filtered active shipments
   const activeStops = stops.filter(s => {
-    const isUnfinished = s.status === 'pending' || s.status === 'in_transit' || s.status === 'partially_completed';
+    const isUnfinished = s.status === 'assigned' || s.status === 'in_transit';
     if (!isUnfinished) return false;
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
     return (
       s.customer_name?.toLowerCase().includes(query) ||
       s.customer_phone?.includes(query) ||
-      s.customer_address?.toLowerCase().includes(query)
+      s.customer_address?.toLowerCase().includes(query) ||
+      s.shipment_number?.toLowerCase().includes(query)
     );
   });
 
@@ -483,32 +478,24 @@ export const DriverPortal: React.FC = () => {
             </div>
           ) : (
             activeStops.map((stop, index) => {
-              const hasInsufficientStock = jarsOnVan < stop.expected_qty;
+              const hasInsufficientStock = jarsOnVan < stop.assigned_qty;
               return (
                 <div
                   key={stop.id}
                   onClick={() => openOrderDetails(stop)}
-                  className={`p-4 rounded-2xl border transition-all cursor-pointer relative overflow-hidden ${
-                    stop.status === 'partially_completed'
-                      ? 'bg-amber-950/20 border-amber-500/40 hover:border-amber-400'
-                      : 'bg-slate-950 border-slate-800 hover:border-brand-500/60 shadow-lg'
-                  }`}
+                  className="p-4 rounded-2xl border transition-all cursor-pointer relative overflow-hidden bg-slate-950 border-slate-800 hover:border-brand-500/60 shadow-lg"
                 >
                   <div className="flex justify-between items-start mb-2">
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-mono font-bold px-2 py-0.5 bg-slate-800 text-brand-300 rounded-lg">
                         #{index + 1}
                       </span>
-                      <h3 className="font-bold text-sm text-white truncate max-w-[190px]">
+                      <h3 className="font-bold text-sm text-white truncate max-w-[180px]">
                         {stop.customer_name}
                       </h3>
                     </div>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                      stop.status === 'partially_completed'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                        : 'bg-brand-500/20 text-brand-300 border border-brand-500/30'
-                    }`}>
-                      {stop.status === 'partially_completed' ? 'Partial' : 'Pending'}
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-brand-500/20 text-brand-300 border border-brand-500/30">
+                      {stop.shipment_number}
                     </span>
                   </div>
 
@@ -517,9 +504,14 @@ export const DriverPortal: React.FC = () => {
                       <MapPin className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mt-0.5" />
                       <span className="line-clamp-1">{stop.customer_address}</span>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      <Phone className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
-                      <span>{stop.customer_phone}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <Phone className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+                        <span>{stop.customer_phone}</span>
+                      </div>
+                      <span className="text-[10px] bg-blue-500/15 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded-full font-semibold">
+                        Jars at Customer: {stop.customer_jar_balance}
+                      </span>
                     </div>
                   </div>
 
@@ -527,17 +519,24 @@ export const DriverPortal: React.FC = () => {
                   {hasInsufficientStock && (
                     <div className="mb-3 px-2 py-1 bg-amber-500/10 border border-amber-500/30 rounded-lg text-[10px] text-amber-300 flex items-center gap-1">
                       <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                      <span>Stock shortfall: You have {jarsOnVan} jars, order requires {stop.expected_qty}.</span>
+                      <span>Stock shortfall: You have {jarsOnVan} jars, shipment requires {stop.assigned_qty}.</span>
                     </div>
                   )}
 
                   <div className="pt-2.5 border-t border-slate-800/80 flex justify-between items-center text-xs">
                     <div className="font-semibold text-brand-300">
-                      {stop.expected_qty} x {stop.product_name}
+                      {stop.assigned_qty} x {stop.product_name}
                     </div>
-                    <div className="flex items-center gap-1 text-brand-400 font-bold text-xs">
-                      <span>View Order</span>
-                      <ChevronRight className="w-3.5 h-3.5" />
+                    <div className="flex items-center gap-2">
+                      {stop.amount_to_collect > 0 && (
+                        <span className="text-[11px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+                          Collect ₹{stop.amount_to_collect.toFixed(0)}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1 text-brand-400 font-bold text-xs">
+                        <span>Deliver</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -839,8 +838,8 @@ export const DriverPortal: React.FC = () => {
               </a>
             </div>
 
-            {/* Address & Instructions */}
-            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-1.5 text-xs">
+            {/* Address, Jars at Customer & Collection Amount (NO jar rate & NO customer dues) */}
+            <div className="bg-slate-950 p-3.5 rounded-2xl border border-slate-800 space-y-2 text-xs">
               <div className="text-slate-400 flex items-start gap-1.5">
                 <MapPin className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mt-0.5" />
                 <span className="text-slate-200">{activeStop.customer_address}</span>
@@ -850,23 +849,31 @@ export const DriverPortal: React.FC = () => {
                   Note: {activeStop.delivery_instructions}
                 </div>
               )}
-              {activeStop.customer_balance !== undefined && activeStop.customer_balance > 0 && (
-                <div className="text-[11px] text-rose-400 font-semibold pt-1 border-t border-slate-900 flex justify-between">
-                  <span>Customer Outstanding Due:</span>
-                  <span>₹{activeStop.customer_balance.toFixed(2)}</span>
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-900">
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-2 text-center">
+                  <div className="text-[10px] text-blue-300 font-semibold">Jars at Customer</div>
+                  <div className="text-base font-extrabold font-mono text-white mt-0.5">
+                    {activeStop.customer_jar_balance} Jars
+                  </div>
                 </div>
-              )}
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-2 text-center">
+                  <div className="text-[10px] text-emerald-300 font-semibold">Amount to Collect</div>
+                  <div className="text-base font-extrabold font-mono text-emerald-400 mt-0.5">
+                    ₹{(activeStop.amount_to_collect || 0).toFixed(2)}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Stock Comparison & Rule Warning */}
-            {jarsOnVan < activeStop.expected_qty && (
+            {jarsOnVan < activeStop.assigned_qty && (
               <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-2xl space-y-1">
                 <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
                   <AlertTriangle className="w-4 h-4 text-amber-400" />
                   <span>Insufficient Stock on Vehicle</span>
                 </div>
                 <p className="text-[11px] text-slate-300">
-                  You have <strong className="text-white">{jarsOnVan} jars</strong> with you, but the order requires <strong className="text-white">{activeStop.expected_qty} jars</strong>.
+                  You have <strong className="text-white">{jarsOnVan} jars</strong> with you, but shipment requires <strong className="text-white">{activeStop.assigned_qty} jars</strong>.
                   Status will be marked <span className="text-amber-400 font-bold uppercase">Partially Completed</span>.
                 </p>
                 <button
@@ -875,12 +882,12 @@ export const DriverPortal: React.FC = () => {
                   className="mt-2 w-full py-1.5 bg-amber-600/30 hover:bg-amber-600/40 text-amber-300 border border-amber-500/40 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition"
                 >
                   <ArrowRight className="w-3.5 h-3.5" />
-                  <span>Assign Another Driver to Deliver Remaining</span>
+                  <span>Transfer Shipment to Another Driver</span>
                 </button>
               </div>
             )}
 
-            {/* Steppers: Delivered & Collected */}
+            {/* Steppers: Delivered & Collected (Autofilled) */}
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 text-center">
                 <div className="text-xs text-slate-400 mb-1 font-semibold">Delivered Jars</div>
@@ -899,7 +906,7 @@ export const DriverPortal: React.FC = () => {
                     +
                   </button>
                 </div>
-                <div className="text-[10px] text-slate-500 mt-1">Required: {activeStop.expected_qty}</div>
+                <div className="text-[10px] text-slate-500 mt-1">Assigned: {activeStop.assigned_qty}</div>
               </div>
 
               <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 text-center">
@@ -923,21 +930,42 @@ export const DriverPortal: React.FC = () => {
               </div>
             </div>
 
-            {/* Cash Collected input */}
-            <div>
-              <div className="flex justify-between items-center text-xs font-semibold text-slate-400 mb-1">
-                <span>Cash Collected (₹ COD)</span>
-                {activeStop.product_price && (
-                  <span className="text-slate-500">Unit: ₹{activeStop.product_price}/jar</span>
-                )}
+            {/* Amount Collected input (NO Unit Price shown!) */}
+            <div className="space-y-2">
+              <div className="flex justify-between items-center text-xs font-semibold text-slate-400">
+                <span>Amount Collected (₹)</span>
+                <div className="flex gap-1">
+                  {(['cash', 'upi', 'unpaid'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => {
+                        setPaymentMode(mode);
+                        if (mode === 'unpaid') setCashCollected(0);
+                      }}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                        paymentMode === mode
+                          ? 'bg-brand-600 text-white'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="relative">
                 <IndianRupee className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
                 <input
                   type="number"
                   min="0"
+                  step="0.01"
                   value={cashCollected}
-                  onChange={(e) => setCashCollected(parseFloat(e.target.value) || 0)}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value) || 0;
+                    setCashCollected(v);
+                    if (v > 0 && paymentMode === 'unpaid') setPaymentMode('cash');
+                  }}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-sm text-white font-mono font-bold focus:outline-none focus:border-brand-500"
                   placeholder="0.00"
                 />
@@ -961,16 +989,16 @@ export const DriverPortal: React.FC = () => {
               <button
                 onClick={handleRecordStop}
                 className={`w-full py-3.5 rounded-2xl text-sm font-extrabold shadow-lg transition flex items-center justify-center gap-2 ${
-                  deliveredQty < activeStop.expected_qty
+                  deliveredQty < activeStop.assigned_qty
                     ? 'bg-amber-600 hover:bg-amber-700 text-white'
                     : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                 }`}
               >
                 <CheckCircle2 className="w-5 h-5" />
                 <span>
-                  {deliveredQty < activeStop.expected_qty
-                    ? `Confirm Partial Drop-Off (${deliveredQty} of ${activeStop.expected_qty} Jars)`
-                    : `Confirm Full Delivery (${deliveredQty} Jars)`}
+                  {deliveredQty < activeStop.assigned_qty
+                    ? `Confirm Partial Drop-Off (${deliveredQty} of ${activeStop.assigned_qty} Jars)`
+                    : `Confirm Full Shipment (${deliveredQty} Jars)`}
                 </span>
               </button>
 
@@ -979,7 +1007,7 @@ export const DriverPortal: React.FC = () => {
                 onClick={() => setIsReassignModalOpen(true)}
                 className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-1.5"
               >
-                <span>Reassign Entire Order to Another Driver</span>
+                <span>Transfer Shipment to Another Driver</span>
               </button>
             </div>
           </div>
@@ -1003,7 +1031,7 @@ export const DriverPortal: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-300">
-              Transfer <strong>{activeStop.customer_name}</strong> ({activeStop.expected_qty} x {activeStop.product_name}) to another driver who has available jars:
+              Transfer <strong>{activeStop.customer_name}</strong> ({activeStop.shipment_number}: {activeStop.assigned_qty} x {activeStop.product_name}) to another driver:
             </p>
 
             <div>

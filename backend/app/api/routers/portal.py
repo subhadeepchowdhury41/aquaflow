@@ -10,10 +10,11 @@ from app.core.database import get_db
 from app.api.dependencies import get_token_payload
 from app.models.customer import Customer, CustomerComplaint
 from app.models.tenant import Tenant, User
-from app.models.delivery import Subscription, DeliveryTask, DeliveryRecord
+from app.models.delivery import Subscription, DeliveryTask, DeliveryRecord, DeliveryShipment
 from app.models.finance import Invoice, Payment, CustomerLedger
 from app.models.product import Product
 from app.services.billing_service import BillingService
+from app.schemas.finance import PaymentCreate
 
 router = APIRouter(prefix="/portal", tags=["Customer Self-Service Portal"])
 
@@ -41,6 +42,9 @@ class ExtraOrderRequest(BaseModel):
     delivery_date: date
     shift: str = "morning"  # morning, afternoon, evening
     notes: Optional[str] = None
+    pay_now_amount: float = 0.0
+    payment_method: str = "upi"
+    payment_ref_id: Optional[str] = None
 
 
 class CustomerServiceTicketRequest(BaseModel):
@@ -96,29 +100,64 @@ def get_customer_deliveries_with_timeline(
     customer: Customer = Depends(get_current_portal_customer),
     db: Session = Depends(get_db)
 ):
-    """Returns past and upcoming deliveries with granular fulfillment timeline details."""
+    """Returns past and upcoming deliveries/requests with granular shipment & timeline details."""
     tasks = db.query(DeliveryTask, Product).join(
         Product, DeliveryTask.product_id == Product.id
     ).filter(
         DeliveryTask.customer_id == customer.id
-    ).order_by(DeliveryTask.scheduled_date.desc()).limit(50).all()
+    ).order_by(DeliveryTask.scheduled_date.desc(), DeliveryTask.created_at.desc()).limit(50).all()
 
     results = []
     for t, p in tasks:
-        # Check delivery record
         record = db.query(DeliveryRecord).filter(DeliveryRecord.delivery_task_id == t.id).first()
+        shp_rows = db.query(DeliveryShipment, User).outerjoin(
+            User, DeliveryShipment.driver_id == User.id
+        ).filter(
+            DeliveryShipment.order_id == t.id
+        ).order_by(DeliveryShipment.created_at.asc()).all()
+
         driver = db.query(User).filter(User.id == t.driver_id).first() if t.driver_id else None
+
+        invoice = db.query(Invoice).filter(Invoice.order_id == t.id).first()
+        order_payments = db.query(Payment).filter(Payment.order_id == t.id, Payment.status == "completed").all()
+        paid_amount = round(sum(pm.amount for pm in order_payments), 2)
+        total_amount = float(invoice.total_amount) if invoice else float(t.total_amount or 0.0)
+        unpaid_amount = 0.0 if t.status in ("rejected", "cancelled") else round(max(0.0, total_amount - paid_amount), 2)
 
         timeline = [
             {
-                "step": "Order Scheduled",
+                "step": "Order Requested" if t.source == "customer_request" else "Order Scheduled",
                 "status": "completed",
-                "time": t.scheduled_date.isoformat(),
-                "description": f"Subscription recurring delivery ({t.expected_qty} {p.unit})"
+                "time": (t.created_at.isoformat() if t.created_at else t.scheduled_date.isoformat()),
+                "description": f"{t.expected_qty} x {p.name} requested for {t.scheduled_date.isoformat()} ({t.shift} shift)"
             }
         ]
 
-        if t.status in ["in_transit", "completed", "partially_completed", "failed"]:
+        if t.status == "requested":
+            timeline.append({
+                "step": "Awaiting Agency Approval",
+                "status": "current",
+                "time": None,
+                "description": "Supplier will review and assign delivery shipment shortly"
+            })
+        elif t.status == "rejected":
+            timeline.append({
+                "step": "Request Rejected",
+                "status": "failed",
+                "time": t.updated_at.isoformat() if t.updated_at else None,
+                "description": t.rejection_reason or "Order rejected by agency"
+            })
+
+        if shp_rows:
+            assigned_names = ", ".join(sorted({d.full_name for _, d in shp_rows if d})) or "Route Executive"
+            total_shp_qty = sum(s.assigned_qty for s, _ in shp_rows if s.status != "cancelled")
+            timeline.append({
+                "step": f"Shipments Assigned ({len(shp_rows)})",
+                "status": "completed",
+                "time": shp_rows[0][0].created_at.isoformat(),
+                "description": f"{total_shp_qty} jars assigned to {assigned_names}"
+            })
+        elif t.status in ["in_transit", "completed", "partially_completed", "failed"]:
             timeline.append({
                 "step": "Dispatched with Driver",
                 "status": "completed" if t.status != "in_transit" else "current",
@@ -126,7 +165,19 @@ def get_customer_deliveries_with_timeline(
                 "description": f"Assigned to {driver.full_name if driver else 'Route Executive'}"
             })
 
-        if record:
+        delivered_sum = sum(s.delivered_qty for s, _ in shp_rows if s.status in ("completed", "partially_completed"))
+        empty_sum = sum(s.empty_collected_qty for s, _ in shp_rows if s.status in ("completed", "partially_completed"))
+        cash_sum = sum(s.cash_collected for s, _ in shp_rows)
+
+        if shp_rows and any(s.delivered_at for s, _ in shp_rows):
+            latest_dt = max((s.delivered_at for s, _ in shp_rows if s.delivered_at), default=None)
+            timeline.append({
+                "step": "Delivered at Doorstep" if t.status == "completed" else "Partially Delivered" if t.status == "partially_completed" else "Delivery Attempt Failed",
+                "status": "completed" if t.status in ("completed", "partially_completed") else "failed",
+                "time": latest_dt.isoformat() if latest_dt else None,
+                "description": f"Delivered: {delivered_sum}/{t.expected_qty} jars | Returned: {empty_sum} empty"
+            })
+        elif record:
             timeline.append({
                 "step": "Delivered at Doorstep" if record.delivery_status == "delivered" else "Delivery Attempt Failed",
                 "status": "completed" if record.delivery_status == "delivered" else "failed",
@@ -138,25 +189,46 @@ def get_customer_deliveries_with_timeline(
                 )
             })
 
+        shipments_summary = [
+            {
+                "id": str(s.id),
+                "shipment_number": s.shipment_number,
+                "driver_name": d.full_name if d else "Unassigned",
+                "assigned_qty": s.assigned_qty,
+                "delivered_qty": s.delivered_qty,
+                "empty_collected_qty": s.empty_collected_qty,
+                "cash_collected": s.cash_collected,
+                "status": s.status,
+                "delivered_at": s.delivered_at.isoformat() if s.delivered_at else None,
+            }
+            for s, d in shp_rows
+        ]
+
         results.append({
             "id": t.id,
+            "order_number": t.order_number,
             "scheduled_date": t.scheduled_date,
             "shift": t.shift,
             "product_name": p.name,
             "product_unit": p.unit,
             "expected_qty": t.expected_qty,
             "status": t.status,
-            "driver_name": driver.full_name if driver else "Delivery Executive",
-            "driver_phone": driver.phone if driver else "",
+            "rejection_reason": t.rejection_reason,
+            "total_amount": total_amount,
+            "paid_amount": paid_amount,
+            "unpaid_amount": unpaid_amount,
+            "driver_name": (shp_rows[0][1].full_name if shp_rows and shp_rows[0][1] else (driver.full_name if driver else "Awaiting Assignment")),
+            "driver_phone": (shp_rows[0][1].phone if shp_rows and shp_rows[0][1] else (driver.phone if driver else "")),
+            "shipments": shipments_summary,
             "record": {
-                "delivered_qty": record.delivered_qty if record else 0,
-                "empty_collected_qty": record.empty_collected_qty if record else 0,
-                "cash_collected": record.cash_collected if record else 0.0,
+                "delivered_qty": delivered_sum if shp_rows else (record.delivered_qty if record else 0),
+                "empty_collected_qty": empty_sum if shp_rows else (record.empty_collected_qty if record else 0),
+                "cash_collected": cash_sum if shp_rows else (record.cash_collected if record else 0.0),
                 "payment_mode": record.payment_mode if record else "unpaid",
                 "delivered_at": record.delivered_at if record else None,
                 "notes": record.notes if record else None,
                 "failure_reason": record.failure_reason if record else None,
-            } if record else None,
+            } if (record or delivered_sum > 0) else None,
             "timeline": timeline
         })
 
@@ -169,50 +241,82 @@ def request_extra_jars(
     customer: Customer = Depends(get_current_portal_customer),
     db: Session = Depends(get_db)
 ):
-    """Customer requests an extra or on-demand jar delivery stop."""
-    # Find 20L jar product or provided product_id
+    """Customer requests an extra or on-demand jar order (enters as 'requested' for owner approval)."""
     if data.product_id:
         product = db.query(Product).filter(Product.id == data.product_id, Product.tenant_id == customer.tenant_id).first()
     else:
         product = db.query(Product).filter(Product.tenant_id == customer.tenant_id, Product.sku == "JAR-20L").first()
+        if not product:
+            product = db.query(Product).filter(Product.tenant_id == customer.tenant_id, Product.is_active == True).first()
 
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    raw_key = f"{customer.tenant_id}:{customer.id}:{product.id}:{data.delivery_date.isoformat()}:{data.shift}:extra-{secrets.token_hex(4)}"
+    pricing = BillingService.resolve_order_pricing(
+        db, customer.tenant_id, customer.id, product.id, data.quantity
+    )
+
+    raw_key = f"{customer.tenant_id}:{customer.id}:{product.id}:{data.delivery_date.isoformat()}:{data.shift}:req-{secrets.token_hex(4)}"
     idempotency_key = hashlib.sha256(raw_key.encode()).hexdigest()
+    order_number = f"ORD-{secrets.token_hex(3).upper()}"
 
     task = DeliveryTask(
         tenant_id=customer.tenant_id,
         branch_id=customer.branch_id,
         route_id=customer.route_id,
-        driver_id=customer.assigned_driver_id,
+        driver_id=None,
         customer_id=customer.id,
         product_id=product.id,
         scheduled_date=data.delivery_date,
         shift=data.shift,
         expected_qty=data.quantity,
-        status="pending",
+        order_number=order_number,
+        unit_price=pricing["unit_price"],
+        total_amount=pricing["total_amount"],
+        notes=data.notes,
+        source="customer_request",
+        status="requested",
         sequence_order=99,
         idempotency_key=idempotency_key
     )
     db.add(task)
+    db.flush()
 
-    # Also log as customer service request
+    if data.pay_now_amount and data.pay_now_amount > 0:
+        invoice = BillingService.generate_order_invoice(db, customer.tenant_id, task, auto_commit=False)
+        BillingService.record_customer_payment(
+            db,
+            customer.tenant_id,
+            PaymentCreate(
+                customer_id=customer.id,
+                invoice_id=invoice.id,
+                order_id=task.id,
+                payment_stage="while_order",
+                amount=data.pay_now_amount,
+                payment_method=data.payment_method or "upi",
+                payment_ref_id=data.payment_ref_id or f"ORDPAY-{secrets.token_hex(3).upper()}",
+                notes=f"Paid while placing Order {order_number}"
+            ),
+            auto_commit=False
+        )
+
     complaint = CustomerComplaint(
         tenant_id=customer.tenant_id,
         customer_id=customer.id,
-        title=f"Extra Order Request: {data.quantity} x {product.name}",
-        description=f"Delivery requested for {data.delivery_date} ({data.shift} shift). Notes: {data.notes or 'None'}",
-        status="in_progress"
+        title=f"Extra Order Request ({order_number}): {data.quantity} x {product.name}",
+        description=f"Requested for {data.delivery_date} ({data.shift} shift). Notes: {data.notes or 'None'}",
+        status="open"
     )
     db.add(complaint)
 
     db.commit()
     return {
         "success": True,
-        "message": f"Successfully placed order for {data.quantity} extra {product.name} on {data.delivery_date}",
-        "task_id": str(task.id)
+        "message": f"Order request {order_number} for {data.quantity} x {product.name} submitted for owner approval.",
+        "task_id": str(task.id),
+        "delivery_task_id": str(task.id),
+        "order_number": order_number,
+        "status": task.status,
     }
 
 

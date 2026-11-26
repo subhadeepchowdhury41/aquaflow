@@ -16,6 +16,7 @@ import { DeliveriesPage } from '@/features/deliveries/DeliveriesPage';
 import { CustomersPage } from '@/features/customers/CustomersPage';
 import { InventoryPage } from '@/features/inventory/InventoryPage';
 import { InvoicesPage } from '@/features/invoices/InvoicesPage';
+import { PaymentsPage } from '@/features/payments/PaymentsPage';
 import { StaffPage } from '@/features/staff/StaffPage';
 import { SubscriptionRenewPage } from '@/features/subscription/SubscriptionRenewPage';
 import { DriverPortal } from '@/features/delivery-portal/DriverPortal';
@@ -82,6 +83,7 @@ export default function App() {
           >
             <Route index element={<TenantDashboard />} />
             <Route path="deliveries" element={<DeliveriesPage />} />
+            <Route path="payments" element={<PaymentsPage />} />
             <Route path="customers" element={<CustomersPage />} />
             <Route path="inventory" element={<InventoryPage />} />
             <Route path="invoices" element={<InvoicesPage />} />

@@ -10,6 +10,7 @@ class Invoice(TenantAwareModel):
 
     customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
     branch_id = Column(GUID(), ForeignKey("branches.id", ondelete="CASCADE"), nullable=False, index=True)
+    order_id = Column(GUID(), ForeignKey("delivery_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
 
     invoice_number = Column(String(50), nullable=False, index=True)
     billing_period_start = Column(Date, nullable=False)
@@ -32,6 +33,7 @@ class Invoice(TenantAwareModel):
 
     customer = relationship("Customer", back_populates="invoices")
     branch = relationship("Branch")
+    order = relationship("DeliveryTask", back_populates="invoice")
     items = relationship("InvoiceItem", back_populates="invoice", cascade="all, delete-orphan")
     payments = relationship("Payment", back_populates="invoice")
 
@@ -58,11 +60,14 @@ class Payment(TenantAwareModel):
 
     customer_id = Column(GUID(), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True)
     invoice_id = Column(GUID(), ForeignKey("invoices.id", ondelete="SET NULL"), nullable=True, index=True)
+    order_id = Column(GUID(), ForeignKey("delivery_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    shipment_id = Column(GUID(), ForeignKey("delivery_shipments.id", ondelete="SET NULL"), nullable=True, index=True)
     payment_number = Column(String(50), nullable=False, index=True)
 
     amount = Column(Float, nullable=False)
     payment_method = Column(String(50), default="cash", nullable=False)  # cash, upi, razorpay, bank_transfer, cheque
     payment_ref_id = Column(String(100), nullable=True)  # Razorpay payment ID / UTR number
+    payment_stage = Column(String(30), default="later", nullable=False)  # while_order, while_delivery, later
     status = Column(String(50), default="completed", nullable=False)  # completed, pending, failed, refunded
     payment_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     collected_by_id = Column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -70,6 +75,8 @@ class Payment(TenantAwareModel):
 
     customer = relationship("Customer")
     invoice = relationship("Invoice", back_populates="payments")
+    order = relationship("DeliveryTask", back_populates="payments")
+    shipment = relationship("DeliveryShipment")
     collector = relationship("User")
 
 

@@ -64,14 +64,30 @@ interface TimelineStep {
 
 interface DeliveryOrder {
   id: string;
+  order_number?: string;
   scheduled_date: string;
   shift: string;
   product_name: string;
   product_unit: string;
   expected_qty: number;
   status: string;
+  rejection_reason?: string;
+  total_amount?: number;
+  paid_amount?: number;
+  unpaid_amount?: number;
   driver_name: string;
   driver_phone?: string;
+  shipments?: Array<{
+    id: string;
+    shipment_number: string;
+    driver_name: string;
+    assigned_qty: number;
+    delivered_qty: number;
+    empty_collected_qty: number;
+    cash_collected: number;
+    status: string;
+    delivered_at?: string;
+  }>;
   record?: {
     delivered_qty: number;
     empty_collected_qty: number;
@@ -167,6 +183,7 @@ export const CustomerPortal: React.FC = () => {
   });
   const [extraShift, setExtraShift] = useState('morning');
   const [extraNotes, setExtraNotes] = useState('');
+  const [extraPayNow, setExtraPayNow] = useState(0);
 
   // Service Request Form
   const [requestCategory, setRequestCategory] = useState('extra_water');
@@ -210,15 +227,18 @@ export const CustomerPortal: React.FC = () => {
   const handleOrderExtra = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await apiClient.post('/portal/order-extra', {
+      const res = await apiClient.post('/portal/order-extra', {
         quantity: extraQuantity,
         delivery_date: extraDate,
         shift: extraShift,
         notes: extraNotes,
+        pay_now_amount: extraPayNow || 0,
+        payment_method: 'upi',
       });
       setIsOrderExtraOpen(false);
       setExtraNotes('');
-      alert(`Order confirmed! ${extraQuantity} water jars scheduled for ${extraDate}.`);
+      setExtraPayNow(0);
+      alert(res.data?.message || `Order request for ${extraQuantity} water jars submitted for owner approval.`);
       await fetchPortalData();
     } catch (err: any) {
       alert(err.response?.data?.detail?.message || 'Failed to place extra order');
@@ -496,11 +516,17 @@ export const CustomerPortal: React.FC = () => {
                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                       order.status === 'completed'
                         ? 'bg-emerald-100 text-emerald-800'
+                        : order.status === 'requested'
+                        ? 'bg-indigo-100 text-indigo-800'
+                        : order.status === 'assigned'
+                        ? 'bg-sky-100 text-sky-800'
+                        : order.status === 'partially_completed'
+                        ? 'bg-orange-100 text-orange-800'
                         : order.status === 'pending'
                         ? 'bg-amber-100 text-amber-800'
                         : 'bg-rose-100 text-rose-800'
                     }`}>
-                      {order.status}
+                      {order.status.replace('_', ' ')}
                     </span>
                   </div>
 
@@ -770,6 +796,35 @@ export const CustomerPortal: React.FC = () => {
               </div>
             </div>
 
+            {/* Rejection Banner */}
+            {selectedOrder.rejection_reason && (
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-800">
+                <strong>Rejection Reason: </strong>{selectedOrder.rejection_reason}
+              </div>
+            )}
+
+            {/* Shipments Breakdown */}
+            {selectedOrder.shipments && selectedOrder.shipments.length > 0 && (
+              <div className="bg-slate-50 p-4 rounded-xl space-y-2 text-xs border border-slate-100">
+                <div className="font-bold text-slate-800">Assigned Delivery Shipments ({selectedOrder.shipments.length})</div>
+                <div className="space-y-1.5">
+                  {selectedOrder.shipments.map((s) => (
+                    <div key={s.id} className="bg-white border border-slate-200 rounded-lg p-2.5 flex justify-between items-center">
+                      <div>
+                        <div className="font-mono font-bold text-slate-900">{s.shipment_number} • {s.driver_name}</div>
+                        <div className="text-[11px] text-slate-500">
+                          Sent: {s.assigned_qty} | Delivered: {s.delivered_qty} | Empties: {s.empty_collected_qty}
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-700">
+                        {s.status.replace('_', ' ')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Stop Proof Details */}
             {selectedOrder.record && (
               <div className="bg-slate-50 p-4 rounded-xl space-y-2 text-xs border border-slate-100">
@@ -862,6 +917,19 @@ export const CustomerPortal: React.FC = () => {
                   onChange={(e) => setExtraNotes(e.target.value)}
                   placeholder="e.g. Leave with security guard"
                   className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Pay Now While Ordering (₹ Optional UPI)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  value={extraPayNow}
+                  onChange={(e) => setExtraPayNow(parseFloat(e.target.value) || 0)}
+                  placeholder="0 (Pay later / at delivery)"
+                  className="w-full px-3 py-2 border rounded-lg text-sm font-mono"
                 />
               </div>
 

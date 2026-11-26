@@ -7,9 +7,10 @@ from app.core.database import get_db
 from app.api.dependencies import get_current_tenant_user, get_current_verified_tenant, require_permission
 from app.core.permissions import Permission
 from app.models.tenant import User, Tenant
-from app.models.delivery import DeliveryRoute, Subscription, DeliveryTask, DeliveryRecord
+from app.models.delivery import DeliveryRoute, Subscription, DeliveryTask, DeliveryRecord, DeliveryShipment
 from app.models.customer import Customer
 from app.models.product import Product
+from app.models.finance import Invoice, Payment
 from app.schemas.delivery import (
     DeliveryRouteCreate,
     DeliveryRouteResponse,
@@ -21,11 +22,162 @@ from app.schemas.delivery import (
     ReassignTaskRequest,
     DriverCompletedShipmentResponse,
     DriverMonthlyReportResponse,
-    DriverDailyStat
+    DriverDailyStat,
+    ShipmentSummaryResponse,
+    OrderPaymentSummary,
+    AssignShipmentRequest,
+    RejectOrderRequest,
+    OwnerOrderCreateRequest,
+    CompleteShipmentRequest,
+    DriverShipmentResponse,
 )
 from app.services.delivery_service import DeliveryService
+from app.services.billing_service import BillingService
 
 router = APIRouter(prefix="/deliveries", tags=["Delivery Operations & Routes"])
+
+
+def _serialize_order(db: Session, task: DeliveryTask, cust: Customer, prod: Product, rec: Optional[DeliveryRecord] = None) -> DeliveryTaskResponse:
+    """Builds full Order response with nested shipments, per-order payments, invoice, and qty progress."""
+    shp_rows = db.query(DeliveryShipment, User).outerjoin(
+        User, DeliveryShipment.driver_id == User.id
+    ).filter(
+        DeliveryShipment.order_id == task.id,
+        DeliveryShipment.tenant_id == task.tenant_id
+    ).order_by(DeliveryShipment.created_at.asc()).all()
+
+    shipments_out: List[ShipmentSummaryResponse] = []
+    delivered_qty_total = 0
+    active_assigned_qty = 0
+    total_assigned_non_cancelled = 0
+
+    for shp, drv in shp_rows:
+        if shp.status in ("completed", "partially_completed"):
+            delivered_qty_total += shp.delivered_qty
+            total_assigned_non_cancelled += shp.delivered_qty
+        elif shp.status in ("assigned", "in_transit"):
+            active_assigned_qty += shp.assigned_qty
+            total_assigned_non_cancelled += shp.assigned_qty
+
+        shipments_out.append(
+            ShipmentSummaryResponse(
+                id=shp.id,
+                shipment_number=shp.shipment_number,
+                order_id=shp.order_id,
+                driver_id=shp.driver_id,
+                driver_name=drv.full_name if drv else None,
+                driver_phone=drv.phone if drv else None,
+                scheduled_date=shp.scheduled_date,
+                shift=shp.shift,
+                assigned_qty=shp.assigned_qty,
+                delivered_qty=shp.delivered_qty,
+                empty_collected_qty=shp.empty_collected_qty,
+                amount_to_collect=shp.amount_to_collect,
+                cash_collected=shp.cash_collected,
+                payment_mode=shp.payment_mode,
+                status=shp.status,
+                delivered_at=shp.delivered_at,
+                notes=shp.notes,
+                failure_reason=shp.failure_reason,
+                created_at=shp.created_at,
+            )
+        )
+
+    invoice = db.query(Invoice).filter(
+        Invoice.order_id == task.id,
+        Invoice.tenant_id == task.tenant_id
+    ).first()
+
+    pay_rows = db.query(Payment, User).outerjoin(
+        User, Payment.collected_by_id == User.id
+    ).filter(
+        Payment.order_id == task.id,
+        Payment.tenant_id == task.tenant_id
+    ).order_by(Payment.payment_date.desc()).all()
+
+    payments_out: List[OrderPaymentSummary] = [
+        OrderPaymentSummary(
+            id=p.id,
+            payment_number=p.payment_number,
+            amount=p.amount,
+            payment_method=p.payment_method,
+            payment_ref_id=p.payment_ref_id,
+            payment_stage=p.payment_stage,
+            status=p.status,
+            payment_date=p.payment_date,
+            notes=p.notes,
+            shipment_id=p.shipment_id,
+            collector_name=col.full_name if col else None,
+        )
+        for p, col in pay_rows
+    ]
+
+    if invoice:
+        total_amount = float(invoice.total_amount)
+    elif task.total_amount and task.total_amount > 0:
+        total_amount = float(task.total_amount)
+    else:
+        pricing = BillingService.resolve_order_pricing(
+            db, task.tenant_id, task.customer_id, task.product_id, task.expected_qty
+        )
+        total_amount = float(pricing["total_amount"])
+
+    paid_amount = round(sum(p.amount for p, _ in pay_rows if p.status == "completed"), 2)
+    if task.status in ("rejected", "cancelled"):
+        unpaid_amount = 0.0
+    else:
+        unpaid_amount = round(max(0.0, total_amount - paid_amount), 2)
+
+    remaining_assignable_qty = 0 if task.status in ("rejected", "cancelled", "completed") else max(
+        0, task.expected_qty - (delivered_qty_total + active_assigned_qty)
+    )
+
+    drv_user = db.query(User).filter(User.id == task.driver_id).first() if task.driver_id else None
+
+    return DeliveryTaskResponse(
+        id=task.id,
+        tenant_id=task.tenant_id,
+        branch_id=task.branch_id,
+        route_id=task.route_id,
+        driver_id=task.driver_id,
+        driver_name=drv_user.full_name if drv_user else None,
+        customer_id=task.customer_id,
+        product_id=task.product_id,
+        customer_name=cust.name,
+        customer_phone=cust.phone,
+        customer_address=cust.address,
+        delivery_instructions=cust.delivery_instructions,
+        customer_balance=cust.current_balance,
+        product_name=prod.name,
+        product_price=task.unit_price or prod.selling_price,
+        order_number=task.order_number,
+        source=task.source,
+        rejection_reason=task.rejection_reason,
+        notes=task.notes,
+        unit_price=task.unit_price or prod.selling_price,
+        total_amount=total_amount,
+        paid_amount=paid_amount,
+        unpaid_amount=unpaid_amount,
+        invoice_id=invoice.id if invoice else None,
+        invoice_number=invoice.invoice_number if invoice else None,
+        assigned_qty_total=total_assigned_non_cancelled,
+        delivered_qty_total=delivered_qty_total,
+        remaining_assignable_qty=remaining_assignable_qty,
+        scheduled_date=task.scheduled_date,
+        shift=task.shift,
+        expected_qty=task.expected_qty,
+        status=task.status,
+        sequence_order=task.sequence_order,
+        idempotency_key=task.idempotency_key,
+        delivered_qty=rec.delivered_qty if rec else (delivered_qty_total if shipments_out else None),
+        empty_collected_qty=rec.empty_collected_qty if rec else (sum(s.empty_collected_qty for s in shipments_out) if shipments_out else None),
+        cash_collected=rec.cash_collected if rec else sum(s.cash_collected for s in shipments_out),
+        payment_mode=rec.payment_mode if rec else None,
+        delivered_at=rec.delivered_at if rec else None,
+        delivery_notes=rec.notes if rec else task.notes,
+        shipments=shipments_out,
+        payments=payments_out,
+    )
 
 
 # --- Delivery Routes ---
@@ -133,7 +285,7 @@ def resume_subscription(
     return {"success": True, "message": "Subscription resumed"}
 
 
-# --- Daily Delivery Operations ---
+# --- Daily Delivery & Order Operations ---
 @router.post("/generate")
 def trigger_daily_delivery_generation(
     target_date: Optional[date] = None,
@@ -141,9 +293,7 @@ def trigger_daily_delivery_generation(
     user: User = Depends(require_permission(Permission.DELIVERY_TASK_GENERATE)),
     db: Session = Depends(get_db)
 ):
-    """Generates today's or specified date's delivery tasks from recurring subscriptions.
-    Idempotent: safe to run multiple times without generating duplicate tasks.
-    """
+    """Generates today's or specified date's delivery orders from recurring subscriptions."""
     chosen_date = target_date or date.today()
     tasks = DeliveryService.generate_daily_delivery_tasks(db, tenant.id, chosen_date)
     return {
@@ -164,16 +314,14 @@ def get_daily_delivery_tasks(
     user: User = Depends(get_current_tenant_user),
     db: Session = Depends(get_db)
 ):
-    """Returns dispatch sheet for delivery drivers or dispatch managers for today or any date."""
+    """Returns orders & dispatch sheet for owners/dispatch managers for a date or all dates."""
     chosen_date = target_date or date.today()
     query = db.query(
-        DeliveryTask, Customer, Product, User, DeliveryRecord
+        DeliveryTask, Customer, Product, DeliveryRecord
     ).join(
         Customer, DeliveryTask.customer_id == Customer.id
     ).join(
         Product, DeliveryTask.product_id == Product.id
-    ).outerjoin(
-        User, DeliveryTask.driver_id == User.id
     ).outerjoin(
         DeliveryRecord, DeliveryTask.id == DeliveryRecord.delivery_task_id
     ).filter(
@@ -190,40 +338,100 @@ def get_daily_delivery_tasks(
     if status_filter:
         query = query.filter(DeliveryTask.status == status_filter)
 
-    results = []
-    for task, cust, prod, drv, rec in query.order_by(DeliveryTask.scheduled_date.asc(), DeliveryTask.sequence_order.asc()).all():
-        results.append(
-            DeliveryTaskResponse(
-                id=task.id,
-                tenant_id=task.tenant_id,
-                branch_id=task.branch_id,
-                route_id=task.route_id,
-                driver_id=task.driver_id,
-                driver_name=drv.full_name if drv else None,
-                customer_id=task.customer_id,
-                product_id=task.product_id,
-                customer_name=cust.name,
-                customer_phone=cust.phone,
-                customer_address=cust.address,
-                delivery_instructions=cust.delivery_instructions,
-                customer_balance=cust.current_balance,
-                product_name=prod.name,
-                product_price=prod.selling_price,
-                scheduled_date=task.scheduled_date,
-                shift=task.shift,
-                expected_qty=task.expected_qty,
-                status=task.status,
-                sequence_order=task.sequence_order,
-                idempotency_key=task.idempotency_key,
-                delivered_qty=rec.delivered_qty if rec else None,
-                empty_collected_qty=rec.empty_collected_qty if rec else None,
-                cash_collected=rec.cash_collected if rec else 0.0,
-                payment_mode=rec.payment_mode if rec else None,
-                delivered_at=rec.delivered_at if rec else None,
-                delivery_notes=rec.notes if rec else None
-            )
+    rows = query.order_by(DeliveryTask.scheduled_date.desc(), DeliveryTask.created_at.desc(), DeliveryTask.sequence_order.asc()).all()
+    return [_serialize_order(db, task, cust, prod, rec) for task, cust, prod, rec in rows]
+
+
+@router.post("/orders", response_model=DeliveryTaskResponse)
+def create_owner_order(
+    data: OwnerOrderCreateRequest,
+    tenant: Tenant = Depends(get_current_verified_tenant),
+    user: User = Depends(require_permission(Permission.DELIVERY_TASK_GENERATE)),
+    db: Session = Depends(get_db)
+):
+    """Owner creates a customer order, generates its invoice, and optionally assigns initial shipments."""
+    try:
+        order = DeliveryService.create_owner_order(db, tenant.id, data, created_by_id=user.id)
+        cust = db.query(Customer).filter(Customer.id == order.customer_id).first()
+        prod = db.query(Product).filter(Product.id == order.product_id).first()
+        return _serialize_order(db, order, cust, prod)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/orders/{order_id}", response_model=DeliveryTaskResponse)
+def get_order_details(
+    order_id: uuid.UUID,
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Fetches a single order with its full shipment breakdown and order payment history."""
+    row = db.query(
+        DeliveryTask, Customer, Product, DeliveryRecord
+    ).join(
+        Customer, DeliveryTask.customer_id == Customer.id
+    ).join(
+        Product, DeliveryTask.product_id == Product.id
+    ).outerjoin(
+        DeliveryRecord, DeliveryTask.id == DeliveryRecord.delivery_task_id
+    ).filter(
+        DeliveryTask.id == order_id,
+        DeliveryTask.tenant_id == user.tenant_id
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    task, cust, prod, rec = row
+    return _serialize_order(db, task, cust, prod, rec)
+
+
+# --- Driver Portal Shipment Endpoints (Strict Financial Privacy) ---
+@router.get("/driver/shipments", response_model=List[DriverShipmentResponse])
+def get_driver_assigned_shipments(
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Returns active shipments assigned to the driver. Excludes jar prices and customer balance."""
+    query = db.query(
+        DeliveryShipment, DeliveryTask, Customer, Product
+    ).join(
+        DeliveryTask, DeliveryShipment.order_id == DeliveryTask.id
+    ).join(
+        Customer, DeliveryShipment.customer_id == Customer.id
+    ).join(
+        Product, DeliveryShipment.product_id == Product.id
+    ).filter(
+        DeliveryShipment.tenant_id == user.tenant_id,
+        DeliveryShipment.status.in_(["assigned", "in_transit"]),
+        DeliveryTask.status.notin_(["rejected", "cancelled"])
+    )
+
+    if user.role == "delivery_driver":
+        query = query.filter(DeliveryShipment.driver_id == user.id)
+
+    rows = query.order_by(DeliveryShipment.scheduled_date.asc(), DeliveryShipment.created_at.asc()).all()
+    return [
+        DriverShipmentResponse(
+            id=shp.id,
+            shipment_number=shp.shipment_number,
+            order_id=order.id,
+            order_number=order.order_number,
+            customer_id=cust.id,
+            customer_name=cust.name,
+            customer_phone=cust.phone,
+            customer_address=cust.address,
+            delivery_instructions=cust.delivery_instructions,
+            customer_jar_balance=cust.jar_balance or 0,
+            product_name=prod.name,
+            assigned_qty=shp.assigned_qty,
+            order_total_qty=order.expected_qty,
+            amount_to_collect=shp.amount_to_collect,
+            scheduled_date=shp.scheduled_date,
+            shift=shp.shift,
+            status=shp.status,
+            notes=shp.notes,
         )
-    return results
+        for shp, order, cust, prod in rows
+    ]
 
 
 @router.get("/driver/completed", response_model=List[DriverCompletedShipmentResponse])
@@ -233,38 +441,39 @@ def get_driver_completed_shipments(
 ):
     """Returns delivery shipments completed or recorded from the driver's end."""
     query = db.query(
-        DeliveryRecord, DeliveryTask, Customer, Product
+        DeliveryShipment, DeliveryTask, Customer, Product
     ).join(
-        DeliveryTask, DeliveryRecord.delivery_task_id == DeliveryTask.id
+        DeliveryTask, DeliveryShipment.order_id == DeliveryTask.id
     ).join(
-        Customer, DeliveryRecord.customer_id == Customer.id
+        Customer, DeliveryShipment.customer_id == Customer.id
     ).join(
-        Product, DeliveryTask.product_id == Product.id
+        Product, DeliveryShipment.product_id == Product.id
     ).filter(
-        DeliveryRecord.tenant_id == user.tenant_id
+        DeliveryShipment.tenant_id == user.tenant_id,
+        DeliveryShipment.status.in_(["completed", "partially_completed", "failed"])
     )
 
     if user.role == "delivery_driver":
-        query = query.filter(DeliveryRecord.driver_id == user.id)
+        query = query.filter(DeliveryShipment.driver_id == user.id)
 
     results = []
-    for rec, task, cust, prod in query.order_by(DeliveryRecord.delivered_at.desc()).limit(150).all():
+    for shp, task, cust, prod in query.order_by(DeliveryShipment.delivered_at.desc(), DeliveryShipment.updated_at.desc()).limit(150).all():
         results.append(
             DriverCompletedShipmentResponse(
-                id=rec.id,
+                id=shp.id,
                 task_id=task.id,
                 customer_id=cust.id,
                 customer_name=cust.name,
                 customer_phone=cust.phone,
                 customer_address=cust.address,
                 product_name=prod.name,
-                delivered_qty=rec.delivered_qty,
-                empty_collected_qty=rec.empty_collected_qty,
-                cash_collected=rec.cash_collected,
-                payment_mode=rec.payment_mode,
-                delivery_status=rec.delivery_status,
-                delivered_at=rec.delivered_at,
-                notes=rec.notes
+                delivered_qty=shp.delivered_qty,
+                empty_collected_qty=shp.empty_collected_qty,
+                cash_collected=shp.cash_collected,
+                payment_mode=shp.payment_mode,
+                delivery_status="delivered" if shp.status in ("completed", "partially_completed") else "failed",
+                delivered_at=shp.delivered_at or shp.updated_at,
+                notes=shp.notes
             )
         )
     return results
@@ -272,12 +481,12 @@ def get_driver_completed_shipments(
 
 @router.get("/driver/monthly-report", response_model=DriverMonthlyReportResponse)
 def get_driver_monthly_report(
-    month: Optional[str] = Query(None, description="Format YYYY-MM"),
+    month: Optional[str] = Query(None, description="YYYY-MM format"),
     driver_id: Optional[uuid.UUID] = Query(None),
     user: User = Depends(get_current_tenant_user),
     db: Session = Depends(get_db)
 ):
-    """Aggregates monthly delivery performance metrics for driver PWA and payroll audit."""
+    """Returns monthly performance and daily breakdown metrics for a driver's shipments."""
     target_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
     target_driver_id = driver_id if (driver_id and user.role != "delivery_driver") else user.id
 
@@ -286,39 +495,32 @@ def get_driver_monthly_report(
 
     year, mon = [int(x) for x in target_month.split("-")]
     start_dt = date(year, mon, 1)
-    if mon == 12:
-        end_dt = date(year + 1, 1, 1)
-    else:
-        end_dt = date(year, mon + 1, 1)
+    end_dt = date(year + 1, 1, 1) if mon == 12 else date(year, mon + 1, 1)
 
-    tasks = db.query(DeliveryTask).filter(
-        DeliveryTask.tenant_id == user.tenant_id,
-        DeliveryTask.driver_id == target_driver_id,
-        DeliveryTask.scheduled_date >= start_dt,
-        DeliveryTask.scheduled_date < end_dt
+    shipments = db.query(DeliveryShipment).filter(
+        DeliveryShipment.tenant_id == user.tenant_id,
+        DeliveryShipment.driver_id == target_driver_id,
+        DeliveryShipment.scheduled_date >= start_dt,
+        DeliveryShipment.scheduled_date < end_dt,
+        DeliveryShipment.status != "cancelled"
     ).all()
 
-    records = db.query(DeliveryRecord).filter(
-        DeliveryRecord.tenant_id == user.tenant_id,
-        DeliveryRecord.driver_id == target_driver_id,
-        DeliveryRecord.delivered_at >= datetime(year, mon, 1, tzinfo=timezone.utc),
-        DeliveryRecord.delivered_at < (datetime(year + 1, 1, 1, tzinfo=timezone.utc) if mon == 12 else datetime(year, mon + 1, 1, tzinfo=timezone.utc))
-    ).all()
+    total_stops = len(shipments)
+    completed_stops = len([s for s in shipments if s.status == "completed"])
+    partially_completed_stops = len([s for s in shipments if s.status == "partially_completed"])
 
-    total_stops = len(tasks)
-    completed_stops = len([t for t in tasks if t.status == "completed"])
-    partially_completed_stops = len([t for t in tasks if t.status == "partially_completed"])
-
-    total_jars_delivered = sum(r.delivered_qty for r in records)
-    total_empties_collected = sum(r.empty_collected_qty for r in records)
-    total_cash_collected = sum(r.cash_collected for r in records)
+    completed_records = [s for s in shipments if s.status in ("completed", "partially_completed")]
+    total_jars_delivered = sum(r.delivered_qty for r in completed_records)
+    total_empties_collected = sum(r.empty_collected_qty for r in completed_records)
+    total_cash_collected = sum(r.cash_collected for r in completed_records)
 
     successful_stops = completed_stops + partially_completed_stops
     completion_rate = round((successful_stops / total_stops * 100), 1) if total_stops > 0 else 100.0
 
     daily_dict = {}
-    for r in records:
-        day_str = r.delivered_at.strftime("%Y-%m-%d")
+    for r in completed_records:
+        dt_ref = r.delivered_at.date() if r.delivered_at else r.scheduled_date
+        day_str = dt_ref.strftime("%Y-%m-%d")
         if day_str not in daily_dict:
             daily_dict[day_str] = {"delivered": 0, "empty": 0, "cash": 0.0, "stops": 0}
         daily_dict[day_str]["delivered"] += r.delivered_qty
@@ -352,6 +554,150 @@ def get_driver_monthly_report(
     )
 
 
+@router.get("/available-drivers")
+def get_available_drivers(
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Lists active delivery drivers in the agency for assigning shipments."""
+    drivers = db.query(User).filter(
+        User.tenant_id == user.tenant_id,
+        User.role == "delivery_driver",
+        User.is_active == True
+    ).all()
+    return [
+        {
+            "id": str(d.id),
+            "name": d.full_name,
+            "phone": d.phone,
+            "is_current": (d.id == user.id)
+        }
+        for d in drivers
+    ]
+
+
+@router.post("/shipments/{shipment_id}/complete")
+def complete_driver_shipment(
+    shipment_id: uuid.UUID,
+    data: CompleteShipmentRequest,
+    tenant: Tenant = Depends(get_current_verified_tenant),
+    user: User = Depends(require_permission(Permission.DELIVERY_RECORD)),
+    db: Session = Depends(get_db)
+):
+    """Marks a shipment completed/partially completed/failed, collects cash, and updates parent order."""
+    try:
+        shp = DeliveryService.complete_shipment(db, tenant.id, shipment_id, data, driver_id=user.id)
+        return {
+            "success": True,
+            "shipment_id": str(shp.id),
+            "order_id": str(shp.order_id),
+            "status": shp.status,
+            "delivered_qty": shp.delivered_qty,
+            "empty_collected": shp.empty_collected_qty,
+            "cash_collected": shp.cash_collected,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/shipments/{shipment_id}/reassign")
+def reassign_shipment(
+    shipment_id: uuid.UUID,
+    data: ReassignTaskRequest,
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Transfers an active shipment to another driver."""
+    shp = db.query(DeliveryShipment).filter(
+        DeliveryShipment.id == shipment_id,
+        DeliveryShipment.tenant_id == user.tenant_id
+    ).first()
+    if not shp:
+        raise HTTPException(status_code=404, detail="Shipment not found")
+
+    new_driver = db.query(User).filter(
+        User.id == data.new_driver_id,
+        User.tenant_id == user.tenant_id,
+        User.is_active == True
+    ).first()
+    if not new_driver:
+        raise HTTPException(status_code=404, detail="Selected driver not found or inactive")
+
+    shp.driver_id = new_driver.id
+    if shp.status in ("failed", "in_transit"):
+        shp.status = "assigned"
+    if data.notes:
+        shp.notes = data.notes
+    db.commit()
+
+    return {
+        "success": True,
+        "shipment_id": str(shp.id),
+        "new_driver_id": str(new_driver.id),
+        "new_driver_name": new_driver.full_name,
+        "message": f"Shipment {shp.shipment_number} reassigned to {new_driver.full_name}"
+    }
+
+
+@router.post("/{order_id}/shipments", response_model=ShipmentSummaryResponse)
+def assign_order_shipment(
+    order_id: uuid.UUID,
+    data: AssignShipmentRequest,
+    tenant: Tenant = Depends(get_current_verified_tenant),
+    user: User = Depends(require_permission(Permission.DELIVERY_TASK_GENERATE)),
+    db: Session = Depends(get_db)
+):
+    """Owner assigns a shipment (chosen driver, jar count, amount to collect) for an order."""
+    try:
+        shp = DeliveryService.assign_shipment(db, tenant.id, order_id, data)
+        drv = db.query(User).filter(User.id == shp.driver_id).first()
+        return ShipmentSummaryResponse(
+            id=shp.id,
+            shipment_number=shp.shipment_number,
+            order_id=shp.order_id,
+            driver_id=shp.driver_id,
+            driver_name=drv.full_name if drv else None,
+            driver_phone=drv.phone if drv else None,
+            scheduled_date=shp.scheduled_date,
+            shift=shp.shift,
+            assigned_qty=shp.assigned_qty,
+            delivered_qty=shp.delivered_qty,
+            empty_collected_qty=shp.empty_collected_qty,
+            amount_to_collect=shp.amount_to_collect,
+            cash_collected=shp.cash_collected,
+            payment_mode=shp.payment_mode,
+            status=shp.status,
+            delivered_at=shp.delivered_at,
+            notes=shp.notes,
+            failure_reason=shp.failure_reason,
+            created_at=shp.created_at,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{order_id}/reject")
+def reject_customer_order(
+    order_id: uuid.UUID,
+    data: RejectOrderRequest,
+    tenant: Tenant = Depends(get_current_verified_tenant),
+    user: User = Depends(require_permission(Permission.DELIVERY_TASK_GENERATE)),
+    db: Session = Depends(get_db)
+):
+    """Owner rejects a requested or pending order."""
+    try:
+        order = DeliveryService.reject_order(db, tenant.id, order_id, reason=data.reason)
+        return {
+            "success": True,
+            "order_id": str(order.id),
+            "status": order.status,
+            "rejection_reason": order.rejection_reason,
+            "message": f"Order {order.order_number or ''} rejected"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/{task_id}/reassign")
 def reassign_delivery_task(
     task_id: uuid.UUID,
@@ -359,7 +705,7 @@ def reassign_delivery_task(
     user: User = Depends(get_current_tenant_user),
     db: Session = Depends(get_db)
 ):
-    """Reassigns a delivery task to another driver in the agency/branch."""
+    """Reassigns a delivery order/task (and its active shipment) to another driver."""
     task = db.query(DeliveryTask).filter(
         DeliveryTask.id == task_id,
         DeliveryTask.tenant_id == user.tenant_id
@@ -377,8 +723,16 @@ def reassign_delivery_task(
 
     old_driver_name = task.driver.full_name if task.driver else "Unassigned"
     task.driver_id = new_driver.id
-    if task.status in ["failed", "in_transit"]:
-        task.status = "pending"
+    if task.status in ["failed", "in_transit", "requested", "pending"]:
+        task.status = "assigned"
+
+    # Also update or create active shipment for backward compatibility
+    active_shp = db.query(DeliveryShipment).filter(
+        DeliveryShipment.order_id == task.id,
+        DeliveryShipment.status.in_(["assigned", "in_transit"])
+    ).first()
+    if active_shp:
+        active_shp.driver_id = new_driver.id
 
     db.commit()
     return {
@@ -389,28 +743,6 @@ def reassign_delivery_task(
         "new_driver_name": new_driver.full_name,
         "message": f"Order successfully reassigned to {new_driver.full_name}"
     }
-
-
-@router.get("/available-drivers")
-def get_available_drivers(
-    user: User = Depends(get_current_tenant_user),
-    db: Session = Depends(get_db)
-):
-    """Lists other active delivery drivers in the agency for transferring orders."""
-    drivers = db.query(User).filter(
-        User.tenant_id == user.tenant_id,
-        User.role == "delivery_driver",
-        User.is_active == True
-    ).all()
-    return [
-        {
-            "id": str(d.id),
-            "name": d.full_name,
-            "phone": d.phone,
-            "is_current": (d.id == user.id)
-        }
-        for d in drivers
-    ]
 
 
 @router.post("/record")
@@ -457,4 +789,3 @@ def sync_offline_delivery_actions(
         "processed_count": processed,
         "errors": errors
     }
-

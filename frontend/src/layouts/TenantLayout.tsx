@@ -13,7 +13,8 @@ import {
   AlertTriangle,
   Droplet,
   ShieldAlert,
-  Sparkles
+  Sparkles,
+  IndianRupee
 } from 'lucide-react';
 
 export const TenantLayout: React.FC = () => {
@@ -29,6 +30,7 @@ export const TenantLayout: React.FC = () => {
   const navItems = [
     { label: 'Dashboard', path: '/app', icon: LayoutDashboard },
     { label: 'Daily Deliveries', path: '/app/deliveries', icon: Truck },
+    { label: 'Payments', path: '/app/payments', icon: IndianRupee },
     { label: 'Customers & Ledger', path: '/app/customers', icon: Users },
     { label: 'Products & Jar Stock', path: '/app/inventory', icon: Package },
     { label: 'Invoices & Billing', path: '/app/invoices', icon: Receipt },

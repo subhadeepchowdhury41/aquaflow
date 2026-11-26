@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { apiClient } from '@/api/client';
 import { 
   Truck, 
@@ -10,144 +11,254 @@ import {
   MapPin, 
   Phone,
   IndianRupee,
-  PackageCheck,
   Calendar,
   ChevronLeft,
   ChevronRight,
-  UserCheck,
   Receipt,
-  FileText,
-  AlertCircle,
   Eye,
   X,
-  CreditCard,
-  Plus
+  Plus,
+  Trash2,
+  UserCheck,
+  AlertCircle,
+  Ban,
+  Package
 } from 'lucide-react';
 
-interface Task {
+interface ShipmentSummary {
   id: string;
+  shipment_number: string;
+  order_id: string;
+  driver_id?: string;
+  driver_name?: string;
+  driver_phone?: string;
+  scheduled_date: string;
+  shift: string;
+  assigned_qty: number;
+  delivered_qty: number;
+  empty_collected_qty: number;
+  amount_to_collect: number;
+  cash_collected: number;
+  payment_mode: string;
+  status: string;
+  delivered_at?: string;
+  notes?: string;
+  failure_reason?: string;
+  created_at: string;
+}
+
+interface OrderPayment {
+  id: string;
+  payment_number: string;
+  amount: number;
+  payment_method: string;
+  payment_ref_id?: string;
+  payment_stage: string;
+  status: string;
+  payment_date: string;
+  notes?: string;
+  shipment_id?: string;
+  collector_name?: string;
+}
+
+interface OrderTask {
+  id: string;
+  order_number?: string;
+  source?: string;
+  rejection_reason?: string;
+  notes?: string;
   customer_id: string;
   customer_name: string;
   customer_phone: string;
   customer_address: string;
   delivery_instructions?: string;
-  customer_balance?: number;
   product_id: string;
   product_name: string;
-  product_price?: number;
+  unit_price?: number;
+  total_amount: number;
+  paid_amount: number;
+  unpaid_amount: number;
+  invoice_id?: string;
+  invoice_number?: string;
   expected_qty: number;
+  assigned_qty_total: number;
+  delivered_qty_total: number;
+  remaining_assignable_qty: number;
   scheduled_date: string;
   shift: string;
   status: string;
-  driver_id?: string;
-  driver_name?: string;
-  delivered_qty?: number;
-  empty_collected_qty?: number;
-  cash_collected?: number;
-  payment_mode?: string;
-  delivered_at?: string;
-  delivery_notes?: string;
+  shipments: ShipmentSummary[];
+  payments: OrderPayment[];
 }
 
 interface AvailableDriver {
   id: string;
   name: string;
   phone: string;
-  is_current: boolean;
 }
 
-interface PaymentRecord {
+interface CustomerOption {
   id: string;
-  payment_number: string;
-  amount: number;
-  payment_method: string;
-  payment_ref_id?: string;
-  status: string;
-  payment_date: string;
+  name: string;
+  phone: string;
+  customer_code: string;
 }
 
-interface LedgerEntry {
+interface ProductOption {
   id: string;
-  transaction_date: string;
-  transaction_type: string;
-  debit_amount: number;
-  credit_amount: number;
-  running_balance: number;
-  notes?: string;
+  name: string;
+  selling_price: number;
+  gst_rate: number;
+  unit: string;
 }
+
+interface InitialShipmentRow {
+  driver_id: string;
+  assigned_qty: number;
+  amount_to_collect: string;
+  notes: string;
+}
+
+const STATUS_BADGE: Record<string, string> = {
+  requested: 'bg-indigo-100 text-indigo-800 border border-indigo-200',
+  pending: 'bg-amber-100 text-amber-800',
+  assigned: 'bg-sky-100 text-sky-800',
+  in_transit: 'bg-blue-100 text-blue-800',
+  partially_completed: 'bg-orange-100 text-orange-800',
+  completed: 'bg-emerald-100 text-emerald-800',
+  rejected: 'bg-rose-100 text-rose-800',
+  failed: 'bg-rose-100 text-rose-800',
+  cancelled: 'bg-slate-100 text-slate-600',
+};
+
+const STAGE_LABEL: Record<string, { label: string; cls: string }> = {
+  while_order: { label: 'While Ordering', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  while_delivery: { label: 'While Delivery', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  later: { label: 'Later Collection', cls: 'bg-slate-100 text-slate-700 border-slate-200' },
+};
 
 export const DeliveriesPage: React.FC = () => {
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tasks, setTasks] = useState<OrderTask[]>([]);
+  const [requestedCountAllDates, setRequestedCountAllDates] = useState(0);
   const [drivers, setDrivers] = useState<AvailableDriver[]>([]);
+  const [customers, setCustomers] = useState<CustomerOption[]>([]);
+  const [products, setProducts] = useState<ProductOption[]>([]);
+
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
-  // Date selection state
   const getTodayStr = () => new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
   const [allDatesMode, setAllDatesMode] = useState<boolean>(false);
 
-  // Reassignment loading state per task
-  const [reassigningTaskId, setReassigningTaskId] = useState<string | null>(null);
+  // Assign Shipment Modal
+  const [assignModalOrder, setAssignModalOrder] = useState<OrderTask | null>(null);
+  const [assignDriverId, setAssignDriverId] = useState<string>('');
+  const [assignQty, setAssignQty] = useState<number>(1);
+  const [assignCollectAmount, setAssignCollectAmount] = useState<number>(0);
+  const [assignNotes, setAssignNotes] = useState<string>('');
+  const [submittingAssign, setSubmittingAssign] = useState(false);
 
-  // Modals state
-  const [completingTask, setCompletingTask] = useState<Task | null>(null);
-  const [historyModalTask, setHistoryModalTask] = useState<Task | null>(null);
-  const [historyTab, setHistoryTab] = useState<'shipment' | 'payments' | 'ledger'>('shipment');
+  // Reject Order Modal
+  const [rejectModalOrder, setRejectModalOrder] = useState<OrderTask | null>(null);
+  const [rejectReason, setRejectReason] = useState<string>('');
+  const [submittingReject, setSubmittingReject] = useState(false);
 
-  // Shipment & Payment History data
-  const [customerPayments, setCustomerPayments] = useState<PaymentRecord[]>([]);
-  const [customerLedger, setCustomerLedger] = useState<LedgerEntry[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  // Order History Modal (Shipments tab + Payments tab — NO ledger)
+  const [historyModalOrder, setHistoryModalOrder] = useState<OrderTask | null>(null);
+  const [historyTab, setHistoryTab] = useState<'shipments' | 'payments'>('shipments');
 
-  // Quick Payment form inside modal
+  // Quick Record Payment inside Order History -> Payments Tab
   const [showQuickPay, setShowQuickPay] = useState(false);
   const [payAmount, setPayAmount] = useState<number>(0);
   const [payMethod, setPayMethod] = useState<string>('cash');
+  const [payRefId, setPayRefId] = useState<string>('');
   const [payNotes, setPayNotes] = useState<string>('');
   const [savingPayment, setSavingPayment] = useState(false);
 
-  // Form for completing delivery directly as owner
-  const [deliveredQty, setDeliveredQty] = useState(1);
-  const [emptyCollectedQty, setEmptyCollectedQty] = useState(1);
-  const [cashCollected, setCashCollected] = useState(0);
-  const [notes, setNotes] = useState('');
+  // Create Order Modal (Owner)
+  const [isCreateOrderOpen, setIsCreateOrderOpen] = useState(false);
+  const [newCustomerId, setNewCustomerId] = useState('');
+  const [newProductId, setNewProductId] = useState('');
+  const [newQty, setNewQty] = useState(2);
+  const [newScheduledDate, setNewScheduledDate] = useState(getTodayStr());
+  const [newShift, setNewShift] = useState('morning');
+  const [newNotes, setNewNotes] = useState('');
+  const [upfrontPayAmount, setUpfrontPayAmount] = useState(0);
+  const [upfrontPayMethod, setUpfrontPayMethod] = useState('cash');
+  const [upfrontPayRef, setUpfrontPayRef] = useState('');
+  const [initialShipments, setInitialShipments] = useState<InitialShipmentRow[]>([]);
+  const [creatingOrder, setCreatingOrder] = useState(false);
 
-  const loadDrivers = async () => {
+  const loadMetadata = async () => {
     try {
-      const res = await apiClient.get('/deliveries/available-drivers');
-      setDrivers(res.data);
+      const [drvRes, custRes, prodRes] = await Promise.all([
+        apiClient.get('/deliveries/available-drivers'),
+        apiClient.get('/customers'),
+        apiClient.get('/products'),
+      ]);
+      setDrivers(drvRes.data);
+      setCustomers(custRes.data);
+      setProducts(prodRes.data);
+      if (drvRes.data.length > 0 && !assignDriverId) setAssignDriverId(drvRes.data[0].id);
+      if (custRes.data.length > 0 && !newCustomerId) setNewCustomerId(custRes.data[0].id);
+      if (prodRes.data.length > 0 && !newProductId) setNewProductId(prodRes.data[0].id);
     } catch (err) {
-      console.error('Failed to load drivers', err);
+      console.error('Failed to load metadata', err);
     }
   };
 
   const loadTasks = async () => {
     try {
       setLoading(true);
-      const params: any = {};
-      if (allDatesMode) {
-        params.all_dates = true;
-      } else {
-        params.target_date = selectedDate;
-      }
-      const res = await apiClient.get('/deliveries/today', { params });
+      const params: Record<string, any> = allDatesMode ? { all_dates: true } : { target_date: selectedDate };
+      const [res, reqRes] = await Promise.all([
+        apiClient.get('/deliveries/today', { params }),
+        apiClient.get('/deliveries/today', { params: { all_dates: true, status_filter: 'requested' } }),
+      ]);
       setTasks(res.data);
+      setRequestedCountAllDates(Array.isArray(reqRes.data) ? reqRes.data.length : 0);
     } catch (err) {
-      console.error('Failed to load tasks', err);
+      console.error('Failed to load orders', err);
     } finally {
       setLoading(false);
     }
   };
 
+  const refreshOrderInHistory = async (orderId: string) => {
+    try {
+      const res = await apiClient.get(`/deliveries/orders/${orderId}`);
+      setHistoryModalOrder(res.data);
+    } catch (err) {
+      console.error('Failed to refresh order history modal', err);
+    }
+  };
+
   useEffect(() => {
-    loadDrivers();
+    loadMetadata();
   }, []);
 
   useEffect(() => {
     loadTasks();
   }, [selectedDate, allDatesMode]);
+
+  // Open linked order when navigated from Universal Payments (?orderId=...)
+  useEffect(() => {
+    const linkedOrderId = searchParams.get('orderId');
+    if (linkedOrderId) {
+      apiClient
+        .get(`/deliveries/orders/${linkedOrderId}`)
+        .then((res) => {
+          setHistoryModalOrder(res.data);
+          setHistoryTab('shipments');
+          setPayAmount(res.data.unpaid_amount || 0);
+          setAllDatesMode(true);
+        })
+        .catch((err) => console.error('Failed to open linked order', err));
+    }
+  }, [searchParams]);
 
   // Date navigation helpers
   const handleDateShift = (days: number) => {
@@ -169,138 +280,197 @@ export const DeliveriesPage: React.FC = () => {
     setSelectedDate(d.toISOString().split('T')[0]);
   };
 
-  // Reassign driver
-  const handleReassignDriver = async (taskId: string, newDriverId: string) => {
-    try {
-      setReassigningTaskId(taskId);
-      const res = await apiClient.post(`/deliveries/${taskId}/reassign`, {
-        new_driver_id: newDriverId,
-      });
-      // Update local task state
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            driver_id: newDriverId,
-            driver_name: res.data.new_driver_name || drivers.find(d => d.id === newDriverId)?.name
-          };
-        }
-        return t;
-      }));
-    } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to reassign driver');
-    } finally {
-      setReassigningTaskId(null);
-    }
+  // Open Assign Shipment modal
+  const openAssignModal = (order: OrderTask) => {
+    const qty = Math.max(1, order.remaining_assignable_qty || order.expected_qty);
+    const plannedAlready = order.shipments
+      .filter((s) => s.status === 'assigned' || s.status === 'in_transit')
+      .reduce((sum, s) => sum + s.amount_to_collect, 0);
+    const unpaidLeft = Math.max(0, (order.unpaid_amount || 0) - plannedAlready);
+    const proportional = Number(((qty / Math.max(1, order.expected_qty)) * (order.total_amount || 0)).toFixed(2));
+    const defaultCollect = Math.min(unpaidLeft, proportional);
+
+    setAssignModalOrder(order);
+    if (!assignDriverId && drivers.length > 0) setAssignDriverId(drivers[0].id);
+    setAssignQty(qty);
+    setAssignCollectAmount(Number(defaultCollect.toFixed(2)));
+    setAssignNotes('');
   };
 
-  // Open Shipment & Payment History Modal
-  const openHistoryModal = async (task: Task) => {
-    setHistoryModalTask(task);
-    setHistoryTab('shipment');
-    setShowQuickPay(false);
-    setPayAmount(task.customer_balance && task.customer_balance > 0 ? task.customer_balance : 0);
-    setLoadingHistory(true);
-    try {
-      const [paymentsRes, ledgerRes] = await Promise.all([
-        apiClient.get('/invoices/payments', { params: { customer_id: task.customer_id } }),
-        apiClient.get(`/customers/${task.customer_id}/ledger`)
-      ]);
-      setCustomerPayments(paymentsRes.data);
-      setCustomerLedger(ledgerRes.data);
-    } catch (err) {
-      console.error('Failed to load customer payment/ledger history', err);
-    } finally {
-      setLoadingHistory(false);
-    }
+  const handleAssignQtyChange = (val: number) => {
+    if (!assignModalOrder) return;
+    const clamped = Math.max(1, Math.min(assignModalOrder.remaining_assignable_qty || assignModalOrder.expected_qty, val));
+    setAssignQty(clamped);
+    const plannedAlready = assignModalOrder.shipments
+      .filter((s) => s.status === 'assigned' || s.status === 'in_transit')
+      .reduce((sum, s) => sum + s.amount_to_collect, 0);
+    const unpaidLeft = Math.max(0, (assignModalOrder.unpaid_amount || 0) - plannedAlready);
+    const proportional = Number(((clamped / Math.max(1, assignModalOrder.expected_qty)) * (assignModalOrder.total_amount || 0)).toFixed(2));
+    setAssignCollectAmount(Number(Math.min(unpaidLeft, proportional).toFixed(2)));
   };
 
-  // Record Quick Payment inside modal
-  const handleRecordQuickPayment = async (e: React.FormEvent) => {
+  const handleAssignShipment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!historyModalTask || payAmount <= 0) return;
+    if (!assignModalOrder || !assignDriverId) return;
+    try {
+      setSubmittingAssign(true);
+      await apiClient.post(`/deliveries/${assignModalOrder.id}/shipments`, {
+        driver_id: assignDriverId,
+        assigned_qty: assignQty,
+        amount_to_collect: assignCollectAmount,
+        notes: assignNotes || undefined,
+      });
+      const updatedId = assignModalOrder.id;
+      setAssignModalOrder(null);
+      await loadTasks();
+      if (historyModalOrder?.id === updatedId) {
+        await refreshOrderInHistory(updatedId);
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to assign shipment');
+    } finally {
+      setSubmittingAssign(false);
+    }
+  };
+
+  const handleRejectOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectModalOrder) return;
+    try {
+      setSubmittingReject(true);
+      await apiClient.post(`/deliveries/${rejectModalOrder.id}/reject`, {
+        reason: rejectReason || 'Rejected by business owner',
+      });
+      setRejectModalOrder(null);
+      setRejectReason('');
+      await loadTasks();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to reject order');
+    } finally {
+      setSubmittingReject(false);
+    }
+  };
+
+  // Open History modal (Shipments & Order Payments only — no ledger)
+  const openHistoryModal = async (order: OrderTask) => {
+    setHistoryModalOrder(order);
+    setHistoryTab('shipments');
+    setShowQuickPay(false);
+    setPayAmount(order.unpaid_amount || 0);
+    setPayRefId('');
+    setPayNotes('');
+    await refreshOrderInHistory(order.id);
+  };
+
+  const closeHistoryModal = () => {
+    setHistoryModalOrder(null);
+    if (searchParams.has('orderId')) {
+      searchParams.delete('orderId');
+      setSearchParams(searchParams, { replace: true });
+    }
+  };
+
+  const handleRecordOrderPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!historyModalOrder || payAmount <= 0) return;
     try {
       setSavingPayment(true);
       await apiClient.post('/invoices/payments', {
-        customer_id: historyModalTask.customer_id,
+        customer_id: historyModalOrder.customer_id,
+        order_id: historyModalOrder.id,
+        invoice_id: historyModalOrder.invoice_id || undefined,
+        payment_stage: 'later',
         amount: payAmount,
         payment_method: payMethod,
-        notes: payNotes || 'Owner collected payment'
+        payment_ref_id: payRefId || undefined,
+        notes: payNotes || `Payment recorded for ${historyModalOrder.order_number || 'order'}`,
       });
-      // Refresh payments and ledger
-      const [paymentsRes, ledgerRes] = await Promise.all([
-        apiClient.get('/invoices/payments', { params: { customer_id: historyModalTask.customer_id } }),
-        apiClient.get(`/customers/${historyModalTask.customer_id}/ledger`)
-      ]);
-      setCustomerPayments(paymentsRes.data);
-      setCustomerLedger(ledgerRes.data);
       setShowQuickPay(false);
+      setPayRefId('');
       setPayNotes('');
-      // Refresh parent task list to update customer balance
-      loadTasks();
+      await Promise.all([refreshOrderInHistory(historyModalOrder.id), loadTasks()]);
     } catch (err: any) {
-      alert(err.response?.data?.detail || 'Failed to record payment');
+      alert(err.response?.data?.detail || 'Failed to record order payment');
     } finally {
       setSavingPayment(false);
     }
   };
 
-  // Completion modal handlers
-  const openCompletionModal = (task: Task) => {
-    setCompletingTask(task);
-    setDeliveredQty(task.expected_qty);
-    setEmptyCollectedQty(task.expected_qty);
-    setCashCollected(0);
-    setNotes('');
+  // Owner Create Order helpers
+  const selectedProdObj = products.find((p) => p.id === newProductId);
+  const estimatedOrderTotal = selectedProdObj
+    ? Number((selectedProdObj.selling_price * newQty * (1 + (selectedProdObj.gst_rate || 0) / 100)).toFixed(2))
+    : 0;
+
+  const totalInitialShippedQty = initialShipments.reduce((s, r) => s + (r.assigned_qty || 0), 0);
+
+  const addInitialShipmentRow = () => {
+    const remaining = Math.max(1, newQty - totalInitialShippedQty);
+    const defaultDriver = drivers[0]?.id || '';
+    const unpaidEst = Math.max(0, estimatedOrderTotal - upfrontPayAmount);
+    setInitialShipments([
+      ...initialShipments,
+      {
+        driver_id: defaultDriver,
+        assigned_qty: remaining,
+        amount_to_collect: unpaidEst.toFixed(2),
+        notes: '',
+      },
+    ]);
   };
 
-  const handleRecordDelivery = async (e: React.FormEvent) => {
+  const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!completingTask) return;
-
-    try {
-      await apiClient.post('/deliveries/record', {
-        delivery_task_id: completingTask.id,
-        delivered_qty: deliveredQty,
-        empty_collected_qty: emptyCollectedQty,
-        cash_collected: cashCollected,
-        payment_mode: cashCollected > 0 ? 'cash' : 'unpaid',
-        delivery_status: deliveredQty === completingTask.expected_qty ? 'delivered' : 'partially_completed',
-        notes: notes,
-      });
-      setCompletingTask(null);
-      await loadTasks();
-    } catch (err: any) {
-      alert(err.response?.data?.detail?.message || err.response?.data?.detail || 'Failed to complete delivery');
+    if (!newCustomerId || !newProductId || newQty <= 0) return;
+    if (totalInitialShippedQty > newQty) {
+      alert(`Assigned shipment quantity (${totalInitialShippedQty}) exceeds order quantity (${newQty}).`);
+      return;
     }
-  };
-
-  const handleMarkFailed = async (task: Task) => {
-    const reason = prompt('Reason for delivery failure (e.g. Customer door locked, out of station):');
-    if (!reason) return;
 
     try {
-      await apiClient.post('/deliveries/record', {
-        delivery_task_id: task.id,
-        delivered_qty: 0,
-        empty_collected_qty: 0,
-        cash_collected: 0,
-        delivery_status: 'failed',
-        failure_reason: reason,
+      setCreatingOrder(true);
+      await apiClient.post('/deliveries/orders', {
+        customer_id: newCustomerId,
+        product_id: newProductId,
+        expected_qty: newQty,
+        scheduled_date: newScheduledDate,
+        shift: newShift,
+        notes: newNotes || undefined,
+        initial_payment_amount: upfrontPayAmount || 0,
+        initial_payment_method: upfrontPayMethod,
+        initial_payment_ref: upfrontPayRef || undefined,
+        shipments: initialShipments
+          .filter((r) => r.driver_id && r.assigned_qty > 0)
+          .map((r) => ({
+            driver_id: r.driver_id,
+            assigned_qty: r.assigned_qty,
+            amount_to_collect: parseFloat(r.amount_to_collect) || 0,
+            notes: r.notes || undefined,
+          })),
       });
+      setIsCreateOrderOpen(false);
+      setNewNotes('');
+      setUpfrontPayAmount(0);
+      setUpfrontPayRef('');
+      setInitialShipments([]);
+      setSelectedDate(newScheduledDate);
+      setAllDatesMode(false);
       await loadTasks();
     } catch (err: any) {
-      alert('Failed to mark task as failed');
+      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to create order');
+    } finally {
+      setCreatingOrder(false);
     }
   };
 
   const filteredTasks = tasks.filter((t) => {
     const matchesFilter = filter === 'all' || t.status === filter;
+    const q = search.toLowerCase();
     const matchesSearch =
-      t.customer_name?.toLowerCase().includes(search.toLowerCase()) ||
+      t.customer_name?.toLowerCase().includes(q) ||
       t.customer_phone?.includes(search) ||
-      t.customer_address?.toLowerCase().includes(search.toLowerCase()) ||
-      t.driver_name?.toLowerCase().includes(search.toLowerCase());
+      t.customer_address?.toLowerCase().includes(q) ||
+      t.order_number?.toLowerCase().includes(q);
     return matchesFilter && matchesSearch;
   });
 
@@ -311,24 +481,55 @@ export const DeliveriesPage: React.FC = () => {
     return selectedDate === d.toISOString().split('T')[0] && !allDatesMode;
   })();
 
+  const statusTabs = ['all', 'requested', 'pending', 'assigned', 'partially_completed', 'completed', 'rejected', 'failed'];
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
+      {/* Pending Customer Requests Alert Banner */}
+      {requestedCountAllDates > 0 && (
+        <div className="bg-indigo-600 text-white px-5 py-3 rounded-2xl shadow-md flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+          <div className="flex items-center space-x-2.5 text-xs">
+            <AlertCircle className="w-5 h-5 flex-shrink-0 text-indigo-200" />
+            <span>
+              <strong>{requestedCountAllDates} New Customer Order Request{requestedCountAllDates > 1 ? 's' : ''}</strong> awaiting your approval &amp; shipment assignment.
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              setAllDatesMode(true);
+              setFilter('requested');
+            }}
+            className="px-3.5 py-1.5 bg-white text-indigo-700 rounded-xl text-xs font-extrabold hover:bg-indigo-50 transition shadow-sm"
+          >
+            Review Requests &rarr;
+          </button>
+        </div>
+      )}
+
       {/* Page Header */}
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
+      <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
         <div>
-          <div className="flex items-center space-x-2">
-            <h1 className="text-xl font-bold text-slate-900 tracking-tight">Delivery Dispatch & Shipment History</h1>
+          <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+            <h1 className="text-xl font-bold text-slate-900 tracking-tight">Orders &amp; Delivery Shipments</h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-brand-50 text-brand-700 border border-brand-200">
-              {allDatesMode ? 'All Upcoming & Recorded Orders' : `${selectedDate}${isToday ? ' (Today)' : isTomorrow ? ' (Tomorrow)' : ''}`}
+              {allDatesMode ? 'All Dates' : `${selectedDate}${isToday ? ' (Today)' : isTomorrow ? ' (Tomorrow)' : ''}`}
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Assign drivers, view 2-jar orders & subscriptions, and inspect complete customer shipments and payment ledgers
+            Review customer requests, create orders, split deliveries into driver shipments, and track per-order invoices &amp; payments
           </p>
         </div>
 
-        {/* Date Selector Navigation Toolbar */}
+        {/* Controls */}
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setIsCreateOrderOpen(true)}
+            className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Create Order</span>
+          </button>
+
           <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
             <button
               onClick={() => handleDateShift(-1)}
@@ -362,7 +563,6 @@ export const DeliveriesPage: React.FC = () => {
             </button>
           </div>
 
-          {/* Date Picker Input */}
           <div className="flex items-center bg-white border border-slate-200 rounded-xl px-2 py-1 space-x-1.5">
             <Calendar className="w-3.5 h-3.5 text-slate-400" />
             <input
@@ -376,7 +576,6 @@ export const DeliveriesPage: React.FC = () => {
             />
           </div>
 
-          {/* All Dates toggle */}
           <button
             onClick={() => setAllDatesMode(!allDatesMode)}
             className={`px-3 py-1.5 rounded-xl text-xs font-bold transition border ${
@@ -401,19 +600,22 @@ export const DeliveriesPage: React.FC = () => {
       {/* Filter Tabs & Search */}
       <div className="flex flex-col sm:flex-row justify-between items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
         <div className="flex space-x-1 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
-          {['all', 'pending', 'completed', 'partially_completed', 'failed'].map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap transition ${
-                filter === f
-                  ? 'bg-brand-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              {f.replace('_', ' ')} ({tasks.filter(t => f === 'all' ? true : t.status === f).length})
-            </button>
-          ))}
+          {statusTabs.map((f) => {
+            const count = tasks.filter((t) => (f === 'all' ? true : t.status === f)).length;
+            return (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap transition ${
+                  filter === f
+                    ? 'bg-brand-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                {f.replace('_', ' ')} ({count})
+              </button>
+            );
+          })}
         </div>
 
         <div className="relative w-full sm:w-80">
@@ -422,132 +624,139 @@ export const DeliveriesPage: React.FC = () => {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search customer, phone, driver, address..."
+            placeholder="Search order #, customer, phone, address..."
             className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-brand-500"
           />
         </div>
       </div>
 
-      {/* Orders & Deliveries Table */}
+      {/* Orders Table (NO Assigned Driver column as requested) */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
               <tr>
-                <th className="p-4">Customer Details</th>
-                <th className="p-4">Delivery Address</th>
-                <th className="p-4">Product & Shift</th>
-                <th className="p-4">Qty</th>
-                <th className="p-4">Assigned Driver</th>
-                <th className="p-4">Status & Shipment</th>
+                <th className="p-4">Order &amp; Customer</th>
+                <th className="p-4">Product &amp; Schedule</th>
+                <th className="p-4">Qty &amp; Shipments</th>
+                <th className="p-4">Order Payment</th>
+                <th className="p-4">Status</th>
                 <th className="p-4 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {filteredTasks.map((t) => (
                 <tr key={t.id} className="hover:bg-slate-50/70 transition">
-                  {/* Customer */}
+                  {/* Order & Customer */}
                   <td className="p-4">
-                    <div className="font-bold text-slate-900 text-sm">{t.customer_name}</div>
-                    <div className="text-slate-500 flex items-center space-x-1 mt-0.5">
-                      <Phone className="w-3 h-3 text-slate-400" />
-                      <span>{t.customer_phone}</span>
+                    <div className="flex items-center space-x-2">
+                      <span className="font-mono font-bold text-[11px] bg-slate-100 text-slate-800 px-2 py-0.5 rounded">
+                        {t.order_number || `ORD-${t.id.slice(0, 6).toUpperCase()}`}
+                      </span>
+                      <span className="font-bold text-slate-900 text-sm">{t.customer_name}</span>
                     </div>
-                    {t.customer_balance !== undefined && (
-                      <div className="mt-1">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          t.customer_balance > 0 ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'
-                        }`}>
-                          Due: ₹{t.customer_balance}
-                        </span>
-                      </div>
-                    )}
+                    <div className="text-slate-500 flex items-center space-x-2 mt-1">
+                      <span className="flex items-center space-x-1">
+                        <Phone className="w-3 h-3 text-slate-400" />
+                        <span>{t.customer_phone}</span>
+                      </span>
+                      <span>•</span>
+                      <span className="flex items-center space-x-1 truncate max-w-[220px]">
+                        <MapPin className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                        <span className="truncate">{t.customer_address}</span>
+                      </span>
+                    </div>
                   </td>
 
-                  {/* Address */}
-                  <td className="p-4 max-w-xs">
-                    <div className="flex items-start space-x-1.5 text-slate-600">
-                      <MapPin className="w-3.5 h-3.5 text-slate-400 flex-shrink-0 mt-0.5" />
-                      <span className="line-clamp-2">{t.customer_address}</span>
-                    </div>
-                    {t.delivery_instructions && (
-                      <div className="text-[10px] text-amber-700 bg-amber-50 rounded px-1.5 py-0.5 mt-1 border border-amber-200/50 inline-block">
-                        Note: {t.delivery_instructions}
-                      </div>
-                    )}
-                  </td>
-
-                  {/* Product & Shift */}
+                  {/* Product & Schedule */}
                   <td className="p-4">
                     <div className="font-semibold text-slate-900">{t.product_name}</div>
                     <div className="text-[11px] text-slate-500 capitalize flex items-center space-x-1 mt-0.5">
                       <Clock className="w-3 h-3 text-slate-400" />
-                      <span>{t.shift} Shift • {t.scheduled_date}</span>
+                      <span>{t.scheduled_date} • {t.shift} Shift</span>
                     </div>
-                  </td>
-
-                  {/* Quantity */}
-                  <td className="p-4">
-                    <div className="font-mono font-bold text-base text-slate-900">
-                      {t.expected_qty} <span className="text-xs font-medium text-slate-500">Jars</span>
-                    </div>
-                    {t.delivered_qty !== undefined && t.delivered_qty !== null && (
-                      <div className="text-[11px] font-medium text-emerald-600">
-                        Delivered: {t.delivered_qty}
+                    {t.invoice_number && (
+                      <div className="text-[10px] font-mono text-brand-700 mt-0.5">
+                        Invoice: {t.invoice_number}
                       </div>
                     )}
                   </td>
 
-                  {/* Assigned Driver Selector */}
+                  {/* Qty & Shipments */}
                   <td className="p-4">
-                    <div className="flex items-center space-x-1.5">
-                      <select
-                        value={t.driver_id || ''}
-                        disabled={reassigningTaskId === t.id}
-                        onChange={(e) => handleReassignDriver(t.id, e.target.value)}
-                        className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:outline-none transition ${
-                          t.driver_id
-                            ? 'bg-blue-50/70 border-blue-200 text-blue-900'
-                            : 'bg-amber-50 border-amber-200 text-amber-800'
-                        }`}
-                      >
-                        <option value="" disabled>-- Assign Driver --</option>
-                        {drivers.map((d) => (
-                          <option key={d.id} value={d.id}>
-                            {d.name} {d.phone ? `(${d.phone})` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      {reassigningTaskId === t.id && (
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                      )}
+                    <div className="font-mono font-bold text-sm text-slate-900">
+                      {t.expected_qty} Jars
                     </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      Shipments: <strong>{t.shipments.length}</strong> • Assigned: {t.assigned_qty_total}/{t.expected_qty}
+                    </div>
+                    {t.delivered_qty_total > 0 && (
+                      <div className="text-[11px] font-semibold text-emerald-700">
+                        Delivered: {t.delivered_qty_total}/{t.expected_qty}
+                      </div>
+                    )}
                   </td>
 
-                  {/* Status & Shipment Record */}
+                  {/* Order Payment */}
+                  <td className="p-4">
+                    <div className="font-mono font-bold text-slate-900">
+                      ₹{(t.total_amount || 0).toFixed(2)}
+                    </div>
+                    <div className="text-[11px] text-emerald-700 font-medium">
+                      Paid: ₹{(t.paid_amount || 0).toFixed(2)}
+                    </div>
+                    {t.unpaid_amount > 0 ? (
+                      <span className="inline-block mt-0.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">
+                        Unpaid: ₹{t.unpaid_amount.toFixed(2)}
+                      </span>
+                    ) : (
+                      <span className="inline-block mt-0.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700">
+                        {t.status === 'rejected' ? 'Cancelled' : 'Settled'}
+                      </span>
+                    )}
+                  </td>
+
+                  {/* Status */}
                   <td className="p-4">
                     <span
                       className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        t.status === 'completed'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : t.status === 'partially_completed'
-                          ? 'bg-orange-100 text-orange-800'
-                          : t.status === 'pending'
-                          ? 'bg-amber-100 text-amber-800'
-                          : 'bg-rose-100 text-rose-800'
+                        STATUS_BADGE[t.status] || 'bg-slate-100 text-slate-700'
                       }`}
                     >
                       {t.status.replace('_', ' ')}
                     </span>
-                    {t.cash_collected && t.cash_collected > 0 ? (
-                      <div className="text-[10px] text-emerald-700 font-bold mt-1">
-                        ₹{t.cash_collected} collected ({t.payment_mode})
+                    {t.rejection_reason && (
+                      <div className="text-[10px] text-rose-600 mt-1 max-w-[160px] truncate" title={t.rejection_reason}>
+                        Reason: {t.rejection_reason}
                       </div>
-                    ) : null}
+                    )}
                   </td>
 
                   {/* Actions */}
-                  <td className="p-4 text-right space-x-2">
+                  <td className="p-4 text-right space-x-1.5 whitespace-nowrap">
+                    {t.remaining_assignable_qty > 0 && !['rejected', 'cancelled', 'completed'].includes(t.status) && (
+                      <button
+                        onClick={() => openAssignModal(t)}
+                        className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center space-x-1"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>Assign</span>
+                      </button>
+                    )}
+
+                    {(t.status === 'requested' || (t.status === 'pending' && t.delivered_qty_total === 0)) && (
+                      <button
+                        onClick={() => {
+                          setRejectModalOrder(t);
+                          setRejectReason('');
+                        }}
+                        className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition inline-flex items-center space-x-1"
+                      >
+                        <Ban className="w-3.5 h-3.5" />
+                        <span>Reject</span>
+                      </button>
+                    )}
+
                     <button
                       onClick={() => openHistoryModal(t)}
                       className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1"
@@ -556,46 +765,21 @@ export const DeliveriesPage: React.FC = () => {
                       <Eye className="w-3.5 h-3.5 text-slate-500" />
                       <span>History</span>
                     </button>
-
-                    {t.status === 'pending' && (
-                      <>
-                        <button
-                          onClick={() => openCompletionModal(t)}
-                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition inline-flex items-center space-x-1"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Deliver</span>
-                        </button>
-                        <button
-                          onClick={() => handleMarkFailed(t)}
-                          className="px-2 py-1.5 border border-slate-200 hover:bg-rose-50 hover:text-rose-600 text-slate-600 rounded-lg text-xs font-semibold transition"
-                          title="Mark Failed"
-                        >
-                          <XCircle className="w-3.5 h-3.5" />
-                        </button>
-                      </>
-                    )}
                   </td>
                 </tr>
               ))}
               {filteredTasks.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="p-12 text-center text-slate-400 text-xs">
+                  <td colSpan={6} className="p-12 text-center text-slate-400 text-xs">
                     <Truck className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                    No delivery tasks matching {allDatesMode ? 'all dates' : selectedDate}.
+                    No orders matching current filters for {allDatesMode ? 'all dates' : selectedDate}.
                     {!allDatesMode && (
                       <div className="mt-2">
-                        <button
-                          onClick={setDateToTomorrow}
-                          className="text-brand-600 font-bold hover:underline"
-                        >
-                          Check Tomorrow's Orders &rarr;
+                        <button onClick={setDateToTomorrow} className="text-brand-600 font-bold hover:underline">
+                          Check Tomorrow&apos;s Orders &rarr;
                         </button>
                         {' or '}
-                        <button
-                          onClick={() => setAllDatesMode(true)}
-                          className="text-purple-600 font-bold hover:underline"
-                        >
+                        <button onClick={() => setAllDatesMode(true)} className="text-purple-600 font-bold hover:underline">
                           View All Dates
                         </button>
                       </div>
@@ -608,202 +792,380 @@ export const DeliveriesPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Shipment & Payment History Modal */}
-      {historyModalTask && (
+      {/* ============================================================ */}
+      {/* ASSIGN SHIPMENT MODAL                                        */}
+      {/* ============================================================ */}
+      {assignModalOrder && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] flex flex-col">
-            {/* Modal Header */}
-            <div className="flex justify-between items-start pb-4 border-b border-slate-100">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <div className="flex justify-between items-start mb-3">
               <div>
-                <div className="flex items-center space-x-2">
-                  <h3 className="font-bold text-lg text-slate-900">
-                    {historyModalTask.customer_name}
-                  </h3>
-                  <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                    historyModalTask.status === 'completed'
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : historyModalTask.status === 'pending'
-                      ? 'bg-amber-100 text-amber-800'
-                      : 'bg-slate-100 text-slate-700'
-                  }`}>
-                    {historyModalTask.status.replace('_', ' ')}
-                  </span>
-                </div>
+                <h3 className="font-bold text-base text-slate-900">
+                  Assign Shipment ({assignModalOrder.order_number})
+                </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Order: {historyModalTask.expected_qty}x {historyModalTask.product_name} • Scheduled: {historyModalTask.scheduled_date} ({historyModalTask.shift} shift)
+                  {assignModalOrder.customer_name} • {assignModalOrder.product_name}
                 </p>
-                <div className="text-xs text-slate-500 mt-0.5 flex items-center space-x-1">
-                  <Phone className="w-3 h-3 text-slate-400" />
-                  <span>{historyModalTask.customer_phone}</span>
-                  <span className="mx-1">•</span>
-                  <MapPin className="w-3 h-3 text-slate-400" />
-                  <span className="truncate max-w-sm">{historyModalTask.customer_address}</span>
+              </div>
+              <button onClick={() => setAssignModalOrder(null)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 grid grid-cols-3 gap-2 text-center text-xs">
+              <div>
+                <div className="text-slate-400 text-[10px]">Ordered</div>
+                <div className="font-bold text-slate-900 font-mono">{assignModalOrder.expected_qty} Jars</div>
+              </div>
+              <div>
+                <div className="text-slate-400 text-[10px]">Unassigned</div>
+                <div className="font-bold text-brand-700 font-mono">{assignModalOrder.remaining_assignable_qty} Jars</div>
+              </div>
+              <div>
+                <div className="text-slate-400 text-[10px]">Unpaid Left</div>
+                <div className="font-bold text-rose-700 font-mono">₹{assignModalOrder.unpaid_amount.toFixed(2)}</div>
+              </div>
+            </div>
+
+            <form onSubmit={handleAssignShipment} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Select Delivery Driver</label>
+                <select
+                  required
+                  value={assignDriverId}
+                  onChange={(e) => setAssignDriverId(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white focus:outline-none focus:border-brand-500"
+                >
+                  <option value="" disabled>-- Choose Driver --</option>
+                  {drivers.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name} ({d.phone})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Jars to Send (Max {assignModalOrder.remaining_assignable_qty})
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max={assignModalOrder.remaining_assignable_qty}
+                    required
+                    value={assignQty}
+                    onChange={(e) => handleAssignQtyChange(parseInt(e.target.value, 10) || 1)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Amount Driver Collects (₹)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    required
+                    value={assignCollectAmount}
+                    onChange={(e) => setAssignCollectAmount(parseFloat(e.target.value) || 0)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
+                  />
                 </div>
               </div>
 
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Instructions for Driver (Optional)</label>
+                <input
+                  type="text"
+                  value={assignNotes}
+                  onChange={(e) => setAssignNotes(e.target.value)}
+                  placeholder="e.g. Collect empty jars from gate, deliver to 2nd floor"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => setAssignModalOrder(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingAssign}
+                  className="px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+                >
+                  {submittingAssign ? 'Assigning...' : 'Confirm & Dispatch Shipment'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* REJECT ORDER MODAL                                           */}
+      {/* ============================================================ */}
+      {rejectModalOrder && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
+            <h3 className="font-bold text-base text-slate-900 mb-1">
+              Reject Order Request ({rejectModalOrder.order_number})
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              {rejectModalOrder.customer_name} • {rejectModalOrder.expected_qty} x {rejectModalOrder.product_name}
+            </p>
+            <form onSubmit={handleRejectOrder} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Rejection Reason</label>
+                <textarea
+                  rows={3}
+                  required
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="e.g. Outside delivery zone, stock unavailable for evening slot"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                />
+              </div>
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setRejectModalOrder(null)}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingReject}
+                  className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
+                >
+                  {submittingReject ? 'Rejecting...' : 'Reject Order'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* ORDER HISTORY MODAL (SHIPMENTS TAB & PAYMENTS TAB ONLY)      */}
+      {/* ============================================================ */}
+      {historyModalOrder && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-3xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex justify-between items-start pb-4 border-b border-slate-100">
+              <div>
+                <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                  <span className="font-mono font-bold text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-800">
+                    {historyModalOrder.order_number || `ORD-${historyModalOrder.id.slice(0, 6).toUpperCase()}`}
+                  </span>
+                  <h3 className="font-bold text-lg text-slate-900">
+                    {historyModalOrder.customer_name}
+                  </h3>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${STATUS_BADGE[historyModalOrder.status] || 'bg-slate-100 text-slate-700'}`}>
+                    {historyModalOrder.status.replace('_', ' ')}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  {historyModalOrder.expected_qty} x {historyModalOrder.product_name} • {historyModalOrder.scheduled_date} ({historyModalOrder.shift} shift)
+                  {historyModalOrder.invoice_number ? ` • Invoice: ${historyModalOrder.invoice_number}` : ''}
+                </p>
+              </div>
               <button
-                onClick={() => setHistoryModalTask(null)}
+                onClick={closeHistoryModal}
                 className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Modal Navigation Tabs */}
-            <div className="flex space-x-2 pt-3 border-b border-slate-100">
+            {/* 2 Tabs Only: Shipments & Payments */}
+            <div className="flex space-x-4 pt-3 border-b border-slate-100">
               <button
-                onClick={() => setHistoryTab('shipment')}
-                className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition flex items-center space-x-1.5 ${
-                  historyTab === 'shipment'
+                onClick={() => setHistoryTab('shipments')}
+                className={`pb-2.5 px-2 text-xs font-bold border-b-2 transition flex items-center space-x-1.5 ${
+                  historyTab === 'shipments'
                     ? 'border-brand-600 text-brand-600'
                     : 'border-transparent text-slate-500 hover:text-slate-800'
                 }`}
               >
                 <Truck className="w-3.5 h-3.5" />
-                <span>Order Shipment Details</span>
+                <span>Shipments ({historyModalOrder.shipments.length})</span>
               </button>
               <button
                 onClick={() => setHistoryTab('payments')}
-                className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition flex items-center space-x-1.5 ${
+                className={`pb-2.5 px-2 text-xs font-bold border-b-2 transition flex items-center space-x-1.5 ${
                   historyTab === 'payments'
                     ? 'border-brand-600 text-brand-600'
                     : 'border-transparent text-slate-500 hover:text-slate-800'
                 }`}
               >
                 <Receipt className="w-3.5 h-3.5" />
-                <span>Payment Receipts ({customerPayments.length})</span>
-              </button>
-              <button
-                onClick={() => setHistoryTab('ledger')}
-                className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition flex items-center space-x-1.5 ${
-                  historyTab === 'ledger'
-                    ? 'border-brand-600 text-brand-600'
-                    : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>Customer Ledger ({customerLedger.length})</span>
+                <span>Order Payments ({historyModalOrder.payments.length})</span>
               </button>
             </div>
 
             {/* Modal Body */}
             <div className="overflow-y-auto flex-1 py-4">
-              {loadingHistory ? (
-                <div className="py-12 text-center text-slate-400 text-xs">
-                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-brand-600" />
-                  Loading shipment and financial records...
-                </div>
-              ) : historyTab === 'shipment' ? (
-                /* TAB 1: SHIPMENT DETAILS */
+              {historyTab === 'shipments' ? (
                 <div className="space-y-4">
-                  {/* Fulfillment Stats Grid */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
-                      <div className="text-[11px] text-slate-500 font-medium">Expected Jars</div>
-                      <div className="text-xl font-bold font-mono text-slate-900 mt-0.5">
-                        {historyModalTask.expected_qty}
+                  {/* Progress Bar & Assign CTA */}
+                  <div className="flex flex-wrap justify-between items-center gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                    <div className="grid grid-cols-4 gap-4 text-xs flex-1">
+                      <div>
+                        <div className="text-slate-400 text-[10px]">Ordered</div>
+                        <div className="font-bold font-mono text-slate-900 text-sm">{historyModalOrder.expected_qty} Jars</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400 text-[10px]">Assigned</div>
+                        <div className="font-bold font-mono text-sky-700 text-sm">{historyModalOrder.assigned_qty_total} Jars</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400 text-[10px]">Delivered</div>
+                        <div className="font-bold font-mono text-emerald-700 text-sm">{historyModalOrder.delivered_qty_total} Jars</div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400 text-[10px]">Unassigned</div>
+                        <div className="font-bold font-mono text-amber-700 text-sm">{historyModalOrder.remaining_assignable_qty} Jars</div>
                       </div>
                     </div>
-                    <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200/80">
-                      <div className="text-[11px] text-emerald-700 font-medium">Delivered Jars</div>
-                      <div className="text-xl font-bold font-mono text-emerald-800 mt-0.5">
-                        {historyModalTask.delivered_qty ?? (historyModalTask.status === 'completed' ? historyModalTask.expected_qty : '—')}
-                      </div>
-                    </div>
-                    <div className="bg-blue-50 p-3 rounded-xl border border-blue-200/80">
-                      <div className="text-[11px] text-blue-700 font-medium">Empty Collected</div>
-                      <div className="text-xl font-bold font-mono text-blue-800 mt-0.5">
-                        {historyModalTask.empty_collected_qty ?? '—'}
-                      </div>
-                    </div>
-                    <div className="bg-amber-50 p-3 rounded-xl border border-amber-200/80">
-                      <div className="text-[11px] text-amber-700 font-medium">Doorstep Cash</div>
-                      <div className="text-xl font-bold font-mono text-amber-800 mt-0.5">
-                        ₹{historyModalTask.cash_collected ?? 0}
-                      </div>
-                    </div>
+                    {historyModalOrder.remaining_assignable_qty > 0 && !['rejected', 'cancelled', 'completed'].includes(historyModalOrder.status) && (
+                      <button
+                        onClick={() => openAssignModal(historyModalOrder)}
+                        className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Assign Shipment</span>
+                      </button>
+                    )}
                   </div>
 
-                  {/* Delivery Execution Information */}
-                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                      Fulfillment Record
-                    </h4>
-                    <div className="grid grid-cols-2 gap-3 text-xs">
-                      <div>
-                        <span className="text-slate-400">Assigned Driver:</span>
-                        <div className="font-semibold text-slate-800 mt-0.5">
-                          {historyModalTask.driver_name || 'Unassigned'}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Delivered Timestamp:</span>
-                        <div className="font-semibold text-slate-800 mt-0.5">
-                          {historyModalTask.delivered_at
-                            ? new Date(historyModalTask.delivered_at).toLocaleString()
-                            : historyModalTask.status === 'completed'
-                            ? `${historyModalTask.scheduled_date} (Logged)`
-                            : 'Pending delivery'}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Payment Collection Mode:</span>
-                        <div className="font-semibold text-slate-800 mt-0.5 capitalize">
-                          {historyModalTask.payment_mode || 'Unpaid / Monthly Ledger'}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400">Driver Remarks / Notes:</span>
-                        <div className="font-semibold text-slate-800 mt-0.5">
-                          {historyModalTask.delivery_notes || 'No remarks submitted'}
-                        </div>
-                      </div>
-                    </div>
+                  {/* Shipments Table */}
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-600 font-semibold border-b">
+                        <tr>
+                          <th className="p-3">Shipment #</th>
+                          <th className="p-3">Driver</th>
+                          <th className="p-3 text-center">Assigned</th>
+                          <th className="p-3 text-center">Delivered</th>
+                          <th className="p-3 text-center">Empties</th>
+                          <th className="p-3 text-right">To Collect</th>
+                          <th className="p-3 text-right">Collected</th>
+                          <th className="p-3">Status &amp; Time</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {historyModalOrder.shipments.map((s) => (
+                          <tr key={s.id} className="hover:bg-slate-50/60">
+                            <td className="p-3 font-mono font-bold text-slate-900">
+                              {s.shipment_number}
+                              {s.notes && <div className="text-[10px] font-sans font-normal text-slate-400 mt-0.5">{s.notes}</div>}
+                            </td>
+                            <td className="p-3">
+                              <div className="font-semibold text-slate-800">{s.driver_name || 'Unassigned'}</div>
+                              {s.driver_phone && <div className="text-[10px] text-slate-400">{s.driver_phone}</div>}
+                            </td>
+                            <td className="p-3 text-center font-mono font-bold text-slate-900">{s.assigned_qty}</td>
+                            <td className="p-3 text-center font-mono font-bold text-emerald-700">
+                              {s.status === 'assigned' || s.status === 'in_transit' ? '—' : s.delivered_qty}
+                            </td>
+                            <td className="p-3 text-center font-mono text-blue-700">
+                              {s.status === 'assigned' || s.status === 'in_transit' ? '—' : s.empty_collected_qty}
+                            </td>
+                            <td className="p-3 text-right font-mono text-slate-600">₹{s.amount_to_collect.toFixed(2)}</td>
+                            <td className="p-3 text-right font-mono font-bold text-emerald-700">
+                              ₹{s.cash_collected.toFixed(2)}
+                            </td>
+                            <td className="p-3">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${STATUS_BADGE[s.status] || 'bg-slate-100 text-slate-700'}`}>
+                                {s.status.replace('_', ' ')}
+                              </span>
+                              {s.delivered_at && (
+                                <div className="text-[10px] text-slate-400 mt-0.5">
+                                  {new Date(s.delivered_at).toLocaleString()}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {historyModalOrder.shipments.length === 0 && (
+                          <tr>
+                            <td colSpan={8} className="p-6 text-center text-slate-400">
+                              No shipments assigned to this order yet.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
                   </div>
-
-                  {/* Customer Delivery Instructions */}
-                  {historyModalTask.delivery_instructions && (
-                    <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
-                      <span className="font-bold">Customer Standing Instructions: </span>
-                      {historyModalTask.delivery_instructions}
-                    </div>
-                  )}
                 </div>
-              ) : historyTab === 'payments' ? (
-                /* TAB 2: PAYMENT RECEIPTS */
+              ) : (
+                /* TAB 2: ORDER PAYMENTS ONLY */
                 <div className="space-y-4">
-                  {/* Customer Balance Banner */}
-                  <div className="flex justify-between items-center bg-slate-50 border border-slate-200 rounded-xl p-3.5">
-                    <div>
-                      <div className="text-xs text-slate-500">Outstanding Balance</div>
-                      <div className="text-xl font-bold font-mono text-slate-900">
-                        ₹{historyModalTask.customer_balance || 0}
+                  {/* Order Payment Summary Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5">
+                      <div className="text-[11px] text-slate-500 font-medium">Order Invoice Total</div>
+                      <div className="text-lg font-bold font-mono text-slate-900 mt-0.5">
+                        ₹{historyModalOrder.total_amount.toFixed(2)}
+                      </div>
+                      {historyModalOrder.invoice_number && (
+                        <div className="text-[10px] font-mono text-slate-400">{historyModalOrder.invoice_number}</div>
+                      )}
+                    </div>
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5">
+                      <div className="text-[11px] text-emerald-700 font-medium">Total Paid for Order</div>
+                      <div className="text-lg font-bold font-mono text-emerald-800 mt-0.5">
+                        ₹{historyModalOrder.paid_amount.toFixed(2)}
                       </div>
                     </div>
-                    <button
-                      onClick={() => setShowQuickPay(!showQuickPay)}
-                      className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-bold transition flex items-center space-x-1"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Record Payment</span>
-                    </button>
+                    <div className={`${historyModalOrder.unpaid_amount > 0 ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'} border rounded-xl p-3.5 flex justify-between items-center`}>
+                      <div>
+                        <div className={`text-[11px] font-medium ${historyModalOrder.unpaid_amount > 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+                          Unpaid Amount Left
+                        </div>
+                        <div className={`text-lg font-bold font-mono mt-0.5 ${historyModalOrder.unpaid_amount > 0 ? 'text-rose-800' : 'text-emerald-700'}`}>
+                          ₹{historyModalOrder.unpaid_amount.toFixed(2)}
+                        </div>
+                      </div>
+                      {historyModalOrder.unpaid_amount > 0 && historyModalOrder.status !== 'rejected' && (
+                        <button
+                          onClick={() => {
+                            setPayAmount(historyModalOrder.unpaid_amount);
+                            setShowQuickPay(!showQuickPay);
+                          }}
+                          className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Pay</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  {/* Quick Payment Form */}
+                  {/* Quick Record Order Payment Form */}
                   {showQuickPay && (
-                    <form onSubmit={handleRecordQuickPayment} className="bg-brand-50/60 border border-brand-200 rounded-xl p-4 space-y-3">
-                      <h4 className="text-xs font-bold text-brand-900">Record Received Payment</h4>
-                      <div className="grid grid-cols-2 gap-3">
+                    <form onSubmit={handleRecordOrderPayment} className="bg-brand-50/60 border border-brand-200 rounded-xl p-4 space-y-3">
+                      <h4 className="text-xs font-bold text-brand-900">Record Payment for {historyModalOrder.order_number}</h4>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                           <label className="block text-[11px] font-bold text-slate-700 mb-1">Amount (₹)</label>
                           <input
                             type="number"
-                            min="1"
+                            min="0.01"
                             step="0.01"
                             required
                             value={payAmount}
                             onChange={(e) => setPayAmount(parseFloat(e.target.value) || 0)}
-                            className="w-full px-3 py-1.5 border rounded-lg text-xs font-semibold"
+                            className="w-full px-3 py-1.5 border rounded-lg text-xs font-semibold bg-white"
                           />
                         </div>
                         <div>
@@ -819,114 +1181,87 @@ export const DeliveriesPage: React.FC = () => {
                             <option value="cheque">Cheque</option>
                           </select>
                         </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-slate-700 mb-1">Reference / UTR (Optional)</label>
+                          <input
+                            type="text"
+                            value={payRefId}
+                            onChange={(e) => setPayRefId(e.target.value)}
+                            placeholder="UTR / Ref #"
+                            className="w-full px-3 py-1.5 border rounded-lg text-xs bg-white"
+                          />
+                        </div>
                       </div>
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Notes / Ref ID</label>
+                        <label className="block text-[11px] font-bold text-slate-700 mb-1">Notes</label>
                         <input
                           type="text"
                           value={payNotes}
                           onChange={(e) => setPayNotes(e.target.value)}
-                          placeholder="e.g. UPI Ref #40291039, or Handed to owner"
-                          className="w-full px-3 py-1.5 border rounded-lg text-xs"
+                          placeholder="Collected after delivery"
+                          className="w-full px-3 py-1.5 border rounded-lg text-xs bg-white"
                         />
                       </div>
-                      <div className="flex justify-end space-x-2 pt-1">
+                      <div className="flex justify-end space-x-2">
                         <button
                           type="button"
                           onClick={() => setShowQuickPay(false)}
-                          className="px-3 py-1 border border-slate-200 rounded-lg text-xs text-slate-600 hover:bg-slate-50"
+                          className="px-3 py-1 border border-slate-200 rounded-lg text-xs text-slate-600 bg-white"
                         >
                           Cancel
                         </button>
                         <button
                           type="submit"
                           disabled={savingPayment}
-                          className="px-4 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition"
+                          className="px-4 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold"
                         >
-                          {savingPayment ? 'Saving...' : 'Save Payment'}
+                          {savingPayment ? 'Saving...' : 'Save Order Payment'}
                         </button>
                       </div>
                     </form>
                   )}
 
-                  {/* Payment List */}
+                  {/* Order Payments Table */}
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
                     <table className="w-full text-left text-xs">
                       <thead className="bg-slate-50 text-slate-600 font-semibold border-b">
                         <tr>
                           <th className="p-3">Receipt #</th>
-                          <th className="p-3">Date</th>
-                          <th className="p-3">Amount</th>
+                          <th className="p-3">Date &amp; Time</th>
+                          <th className="p-3">Stage</th>
                           <th className="p-3">Method</th>
-                          <th className="p-3">Status</th>
+                          <th className="p-3 text-right">Amount</th>
+                          <th className="p-3">Notes / Collector</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {customerPayments.map((p) => (
-                          <tr key={p.id} className="hover:bg-slate-50/60">
-                            <td className="p-3 font-mono font-bold text-slate-900">{p.payment_number}</td>
-                            <td className="p-3 text-slate-600">{new Date(p.payment_date).toLocaleDateString()}</td>
-                            <td className="p-3 font-mono font-bold text-emerald-700">₹{p.amount}</td>
-                            <td className="p-3 uppercase text-[11px] font-medium text-slate-600">{p.payment_method}</td>
-                            <td className="p-3">
-                              <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-bold">
-                                {p.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                        {customerPayments.length === 0 && (
+                        {historyModalOrder.payments.map((p) => {
+                          const stage = STAGE_LABEL[p.payment_stage] || STAGE_LABEL.later;
+                          return (
+                            <tr key={p.id} className="hover:bg-slate-50/60">
+                              <td className="p-3 font-mono font-bold text-slate-900">{p.payment_number}</td>
+                              <td className="p-3 text-slate-600">{new Date(p.payment_date).toLocaleString()}</td>
+                              <td className="p-3">
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${stage.cls}`}>
+                                  {stage.label}
+                                </span>
+                              </td>
+                              <td className="p-3 uppercase text-[11px] font-medium text-slate-700">
+                                {p.payment_method}
+                                {p.payment_ref_id && <div className="text-[10px] text-slate-400 font-mono">{p.payment_ref_id}</div>}
+                              </td>
+                              <td className="p-3 text-right font-mono font-bold text-emerald-700">₹{p.amount.toFixed(2)}</td>
+                              <td className="p-3 text-slate-500">
+                                <div>{p.notes || '—'}</div>
+                                {p.collector_name && <div className="text-[10px] text-slate-400">By: {p.collector_name}</div>}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {historyModalOrder.payments.length === 0 && (
                           <tr>
-                            <td colSpan={5} className="p-6 text-center text-slate-400 text-xs">
-                              No payment receipts recorded for this customer yet.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                /* TAB 3: CUSTOMER LEDGER */
-                <div className="space-y-4">
-                  <div className="border border-slate-200 rounded-xl overflow-hidden">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-50 text-slate-600 font-semibold border-b">
-                        <tr>
-                          <th className="p-3">Date</th>
-                          <th className="p-3">Description</th>
-                          <th className="p-3 text-right">Debit (Charges)</th>
-                          <th className="p-3 text-right">Credit (Paid)</th>
-                          <th className="p-3 text-right">Balance</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 font-mono">
-                        {customerLedger.map((e) => (
-                          <tr key={e.id} className="hover:bg-slate-50/60">
-                            <td className="p-3 text-slate-600 font-sans">
-                              {new Date(e.transaction_date).toLocaleDateString()}
-                            </td>
-                            <td className="p-3 font-sans">
-                              <div className="font-semibold text-slate-800 capitalize">
-                                {e.transaction_type.replace('_', ' ')}
-                              </div>
-                              {e.notes && <div className="text-[10px] text-slate-400">{e.notes}</div>}
-                            </td>
-                            <td className="p-3 text-right text-rose-700 font-bold">
-                              {e.debit_amount > 0 ? `₹${e.debit_amount}` : '—'}
-                            </td>
-                            <td className="p-3 text-right text-emerald-700 font-bold">
-                              {e.credit_amount > 0 ? `₹${e.credit_amount}` : '—'}
-                            </td>
-                            <td className="p-3 text-right font-bold text-slate-900">
-                              ₹{e.running_balance}
-                            </td>
-                          </tr>
-                        ))}
-                        {customerLedger.length === 0 && (
-                          <tr>
-                            <td colSpan={5} className="p-6 text-center text-slate-400 text-xs font-sans">
-                              No ledger entries recorded yet.
+                            <td colSpan={6} className="p-6 text-center text-slate-400">
+                              No payments recorded for this order yet.
                             </td>
                           </tr>
                         )}
@@ -937,10 +1272,9 @@ export const DeliveriesPage: React.FC = () => {
               )}
             </div>
 
-            {/* Modal Footer */}
             <div className="pt-3 border-t border-slate-100 flex justify-end">
               <button
-                onClick={() => setHistoryModalTask(null)}
+                onClick={closeHistoryModal}
                 className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition"
               >
                 Close
@@ -950,85 +1284,244 @@ export const DeliveriesPage: React.FC = () => {
         </div>
       )}
 
-      {/* Record Delivery Completion Modal */}
-      {completingTask && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
-            <h3 className="font-bold text-base text-slate-900 mb-1">
-              Record Delivery: {completingTask.customer_name}
-            </h3>
-            <p className="text-xs text-slate-500 mb-4">
-              {completingTask.product_name} • Scheduled: {completingTask.expected_qty} Jars
-            </p>
+      {/* ============================================================ */}
+      {/* OWNER CREATE ORDER + SHIPMENTS MODAL                         */}
+      {/* ============================================================ */}
+      {isCreateOrderOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-center pb-3 border-b border-slate-100 mb-4">
+              <div>
+                <h3 className="font-bold text-base text-slate-900">Create New Order &amp; Assign Shipments</h3>
+                <p className="text-xs text-slate-500">Automatically generates the order invoice and splits delivery across one or more drivers</p>
+              </div>
+              <button onClick={() => setIsCreateOrderOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
 
-            <form onSubmit={handleRecordDelivery} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleCreateOrder} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Delivered Filled Jars</label>
-                  <input
-                    type="number"
-                    min="0"
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Customer</label>
+                  <select
                     required
-                    value={deliveredQty}
-                    onChange={(e) => setDeliveredQty(parseInt(e.target.value) || 0)}
-                    className="w-full px-3 py-2 border rounded-lg text-sm font-semibold"
-                  />
+                    value={newCustomerId}
+                    onChange={(e) => setNewCustomerId(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white"
+                  >
+                    {customers.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} ({c.phone})
+                      </option>
+                    ))}
+                  </select>
                 </div>
+
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Empty Jars Collected</label>
-                  <input
-                    type="number"
-                    min="0"
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Product</label>
+                  <select
                     required
-                    value={emptyCollectedQty}
-                    onChange={(e) => setEmptyCollectedQty(parseInt(e.target.value) || 0)}
-                    className="w-full px-3 py-2 border rounded-lg text-sm font-semibold"
-                  />
+                    value={newProductId}
+                    onChange={(e) => setNewProductId(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white"
+                  >
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} (₹{p.selling_price})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Cash Collected at Doorstep (₹ COD)
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 text-slate-400 text-sm font-bold">₹</span>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Quantity (Jars)</label>
                   <input
                     type="number"
-                    min="0"
-                    value={cashCollected}
-                    onChange={(e) => setCashCollected(parseFloat(e.target.value) || 0)}
-                    className="w-full pl-8 pr-3 py-2 border rounded-lg text-sm font-semibold"
-                    placeholder="0.00"
+                    min="1"
+                    required
+                    value={newQty}
+                    onChange={(e) => setNewQty(parseInt(e.target.value, 10) || 1)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold font-mono"
                   />
                 </div>
-                <p className="text-[11px] text-slate-400 mt-1">Leave 0 if postpaid billing ledger applies.</p>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Delivery Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={newScheduledDate}
+                    onChange={(e) => setNewScheduledDate(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Shift</label>
+                  <select
+                    value={newShift}
+                    onChange={(e) => setNewShift(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-white"
+                  >
+                    <option value="morning">Morning</option>
+                    <option value="afternoon">Afternoon</option>
+                    <option value="evening">Evening</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex justify-between items-center text-xs">
+                <span className="text-slate-600 font-medium">Estimated Order Invoice Total (incl. GST):</span>
+                <span className="text-base font-extrabold font-mono text-slate-900">₹{estimatedOrderTotal.toFixed(2)}</span>
+              </div>
+
+              {/* Upfront payment while creating order */}
+              <div className="border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                <div className="text-xs font-bold text-slate-800">Payment Received While Ordering (Optional)</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-500 mb-1">Amount Paid Now (₹)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={upfrontPayAmount}
+                      onChange={(e) => setUpfrontPayAmount(parseFloat(e.target.value) || 0)}
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-bold font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-500 mb-1">Method</label>
+                    <select
+                      value={upfrontPayMethod}
+                      onChange={(e) => setUpfrontPayMethod(e.target.value)}
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs bg-white"
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="upi">UPI</option>
+                      <option value="bank_transfer">Bank Transfer</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-500 mb-1">Ref / UTR</label>
+                    <input
+                      type="text"
+                      value={upfrontPayRef}
+                      onChange={(e) => setUpfrontPayRef(e.target.value)}
+                      placeholder="Optional"
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Optional Initial Shipments Builder */}
+              <div className="border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <div className="text-xs font-bold text-slate-800">Assign Shipments Now (Optional)</div>
+                    <div className="text-[11px] text-slate-500">
+                      Split {newQty} jars across 1 or more drivers ({totalInitialShippedQty}/{newQty} assigned)
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={addInitialShipmentRow}
+                    disabled={totalInitialShippedQty >= newQty}
+                    className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white rounded-lg text-xs font-bold flex items-center space-x-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Shipment</span>
+                  </button>
+                </div>
+
+                {initialShipments.map((row, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-2 items-end bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                    <div className="col-span-5">
+                      <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">Driver</label>
+                      <select
+                        value={row.driver_id}
+                        onChange={(e) => {
+                          const next = [...initialShipments];
+                          next[idx].driver_id = e.target.value;
+                          setInitialShipments(next);
+                        }}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs bg-white"
+                      >
+                        {drivers.map((d) => (
+                          <option key={d.id} value={d.id}>{d.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">Jars Qty</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max={newQty}
+                        value={row.assigned_qty}
+                        onChange={(e) => {
+                          const next = [...initialShipments];
+                          next[idx].assigned_qty = parseInt(e.target.value, 10) || 1;
+                          setInitialShipments(next);
+                        }}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div className="col-span-3">
+                      <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">Collect (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={row.amount_to_collect}
+                        onChange={(e) => {
+                          const next = [...initialShipments];
+                          next[idx].amount_to_collect = e.target.value;
+                          setInitialShipments(next);
+                        }}
+                        className="w-full px-2 py-1.5 border rounded-lg text-xs font-mono font-bold"
+                      />
+                    </div>
+                    <div className="col-span-1 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setInitialShipments(initialShipments.filter((_, i) => i !== idx))}
+                        className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Delivery Remarks</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Order Notes (Optional)</label>
                 <input
                   type="text"
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-sm"
-                  placeholder="e.g. Left with guard, payment via GPay"
+                  value={newNotes}
+                  onChange={(e) => setNewNotes(e.target.value)}
+                  placeholder="Special delivery instructions or event details"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
                 />
               </div>
 
               <div className="flex justify-end space-x-2 pt-3 border-t">
                 <button
                   type="button"
-                  onClick={() => setCompletingTask(null)}
-                  className="px-4 py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  onClick={() => setIsCreateOrderOpen(false)}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+                  disabled={creatingOrder}
+                  className="px-5 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-xl text-xs font-bold shadow-sm transition"
                 >
-                  Save & Confirm Stop
+                  {creatingOrder ? 'Creating Order...' : 'Create Order & Generate Invoice'}
                 </button>
               </div>
             </form>

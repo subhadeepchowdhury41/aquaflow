@@ -132,13 +132,146 @@ class BillingService:
         return generated_invoices
 
     @staticmethod
+    def resolve_order_pricing(
+        db: Session,
+        tenant_id: uuid.UUID,
+        customer_id: uuid.UUID,
+        product_id: uuid.UUID,
+        quantity: int
+    ) -> dict:
+        """Resolves customer-specific or catalog pricing + GST for a single order."""
+        product = db.query(Product).filter(
+            Product.id == product_id,
+            Product.tenant_id == tenant_id
+        ).first()
+        if not product:
+            raise ValueError("Product not found")
+
+        custom = db.query(CustomerProductPrice).filter(
+            CustomerProductPrice.tenant_id == tenant_id,
+            CustomerProductPrice.customer_id == customer_id,
+            CustomerProductPrice.product_id == product_id
+        ).first()
+        unit_price = custom.custom_price if custom else product.selling_price
+        subtotal = round(quantity * unit_price, 2)
+        gst_rate = float(product.gst_rate or 0.0)
+        tax_amount = round((subtotal * gst_rate) / 100.0, 2)
+        total_amount = round(subtotal + tax_amount, 2)
+        return {
+            "product": product,
+            "unit_price": unit_price,
+            "subtotal": subtotal,
+            "gst_rate": gst_rate,
+            "tax_amount": tax_amount,
+            "total_amount": total_amount,
+        }
+
+    @staticmethod
+    def generate_order_invoice(
+        db: Session,
+        tenant_id: uuid.UUID,
+        order: DeliveryTask,
+        auto_commit: bool = False
+    ) -> Invoice:
+        """Generates (idempotently) a per-order invoice and debits the customer ledger once."""
+        existing = db.query(Invoice).filter(
+            Invoice.tenant_id == tenant_id,
+            Invoice.order_id == order.id
+        ).first()
+        if existing:
+            return existing
+
+        customer = db.query(Customer).filter(
+            Customer.id == order.customer_id,
+            Customer.tenant_id == tenant_id
+        ).first()
+        if not customer:
+            raise ValueError("Customer not found")
+
+        pricing = BillingService.resolve_order_pricing(
+            db, tenant_id, order.customer_id, order.product_id, order.expected_qty
+        )
+        prod = pricing["product"]
+
+        order.unit_price = pricing["unit_price"]
+        order.total_amount = pricing["total_amount"]
+
+        inv_suffix = order.order_number or secrets.token_hex(3).upper()
+        inv_number = f"INV-{inv_suffix}"
+        if db.query(Invoice).filter(Invoice.tenant_id == tenant_id, Invoice.invoice_number == inv_number).first():
+            inv_number = f"INV-{inv_suffix}-{secrets.token_hex(2).upper()}"
+
+        branch_id = order.branch_id or customer.branch_id
+        total_amount = pricing["total_amount"]
+        tax_amount = pricing["tax_amount"]
+
+        invoice = Invoice(
+            tenant_id=tenant_id,
+            customer_id=customer.id,
+            branch_id=branch_id,
+            order_id=order.id,
+            invoice_number=inv_number,
+            billing_period_start=order.scheduled_date,
+            billing_period_end=order.scheduled_date,
+            due_date=order.scheduled_date + timedelta(days=7),
+            subtotal=pricing["subtotal"],
+            cgst_amount=round(tax_amount / 2.0, 2),
+            sgst_amount=round(tax_amount / 2.0, 2),
+            igst_amount=0.0,
+            total_tax=tax_amount,
+            total_amount=total_amount,
+            paid_amount=0.0,
+            balance_due=total_amount,
+            status="unpaid" if total_amount > 0 else "paid",
+            notes=f"Auto-generated invoice for Order {order.order_number or order.id}"
+        )
+        db.add(invoice)
+        db.flush()
+
+        item = InvoiceItem(
+            tenant_id=tenant_id,
+            invoice_id=invoice.id,
+            product_id=prod.id,
+            description=f"{prod.name} ({order.expected_qty} {prod.unit})",
+            quantity=order.expected_qty,
+            unit_price=pricing["unit_price"],
+            gst_rate=pricing["gst_rate"],
+            tax_amount=tax_amount,
+            total_amount=total_amount
+        )
+        db.add(item)
+
+        if total_amount > 0:
+            now = datetime.now(timezone.utc)
+            customer.current_balance += total_amount
+            ledger_debit = CustomerLedger(
+                tenant_id=tenant_id,
+                customer_id=customer.id,
+                transaction_date=now,
+                transaction_type="invoice_charge",
+                debit_amount=total_amount,
+                credit_amount=0.0,
+                running_balance=customer.current_balance,
+                reference_type="order_invoice",
+                reference_id=invoice.id,
+                notes=f"Order {order.order_number or ''} Invoice {inv_number}: {order.expected_qty} x {prod.name}"
+            )
+            db.add(ledger_debit)
+
+        if auto_commit:
+            db.commit()
+            db.refresh(invoice)
+        return invoice
+
+    @staticmethod
     def record_customer_payment(
         db: Session,
         tenant_id: uuid.UUID,
         data: PaymentCreate,
-        collector_id: Optional[uuid.UUID] = None
+        collector_id: Optional[uuid.UUID] = None,
+        auto_commit: bool = True
     ) -> Payment:
-        """Records an official customer payment, reconciles against invoices, and updates ledger."""
+        """Records an official customer payment, reconciles against order/invoice, and updates ledger."""
         customer = db.query(Customer).filter(
             Customer.id == data.customer_id,
             Customer.tenant_id == tenant_id
@@ -149,37 +282,59 @@ class BillingService:
         now = datetime.now(timezone.utc)
         pay_number = f"RCPT-{secrets.token_hex(4).upper()}"
 
+        target_invoice_id = data.invoice_id
+        target_invoice: Optional[Invoice] = None
+
+        if target_invoice_id:
+            target_invoice = db.query(Invoice).filter(
+                Invoice.id == target_invoice_id,
+                Invoice.tenant_id == tenant_id
+            ).first()
+        elif data.order_id:
+            target_invoice = db.query(Invoice).filter(
+                Invoice.order_id == data.order_id,
+                Invoice.tenant_id == tenant_id
+            ).first()
+            if not target_invoice:
+                order = db.query(DeliveryTask).filter(
+                    DeliveryTask.id == data.order_id,
+                    DeliveryTask.tenant_id == tenant_id
+                ).first()
+                if order:
+                    target_invoice = BillingService.generate_order_invoice(db, tenant_id, order, auto_commit=False)
+            if target_invoice:
+                target_invoice_id = target_invoice.id
+
         payment = Payment(
             tenant_id=tenant_id,
             customer_id=customer.id,
-            invoice_id=data.invoice_id,
+            invoice_id=target_invoice_id,
+            order_id=data.order_id or (target_invoice.order_id if target_invoice else None),
+            shipment_id=data.shipment_id,
             payment_number=pay_number,
             amount=data.amount,
             payment_method=data.payment_method,
             payment_ref_id=data.payment_ref_id,
+            payment_stage=data.payment_stage or "later",
             status="completed",
             payment_date=now,
             collected_by_id=collector_id,
             notes=data.notes
         )
         db.add(payment)
+        db.flush()
 
-        # Update specific invoice if targeted
-        if data.invoice_id:
-            invoice = db.query(Invoice).filter(
-                Invoice.id == data.invoice_id,
-                Invoice.tenant_id == tenant_id
-            ).first()
-            if invoice:
-                invoice.paid_amount += data.amount
-                invoice.balance_due = max(0.0, invoice.total_amount - invoice.paid_amount)
-                if invoice.balance_due <= 0:
-                    invoice.status = "paid"
-                else:
-                    invoice.status = "partially_paid"
+        if target_invoice:
+            target_invoice.paid_amount = round(target_invoice.paid_amount + data.amount, 2)
+            target_invoice.balance_due = round(max(0.0, target_invoice.total_amount - target_invoice.paid_amount), 2)
+            if target_invoice.balance_due <= 0.01:
+                target_invoice.balance_due = 0.0
+                target_invoice.status = "paid"
+            else:
+                target_invoice.status = "partially_paid"
 
         # Update customer balance and immutable ledger
-        customer.current_balance -= data.amount
+        customer.current_balance = round(customer.current_balance - data.amount, 2)
 
         ledger_entry = CustomerLedger(
             tenant_id=tenant_id,
@@ -195,7 +350,8 @@ class BillingService:
         )
         db.add(ledger_entry)
 
-        db.commit()
-        db.refresh(payment)
+        if auto_commit:
+            db.commit()
+            db.refresh(payment)
         return payment
 
