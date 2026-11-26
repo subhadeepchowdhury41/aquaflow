@@ -62,12 +62,16 @@ class DeliveryTaskResponse(BaseModel):
     branch_id: uuid.UUID
     route_id: Optional[uuid.UUID] = None
     driver_id: Optional[uuid.UUID] = None
+    driver_name: Optional[str] = None
     customer_id: uuid.UUID
     product_id: uuid.UUID
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
     customer_address: Optional[str] = None
+    delivery_instructions: Optional[str] = None
+    customer_balance: Optional[float] = 0.0
     product_name: Optional[str] = None
+    product_price: Optional[float] = 40.0
     scheduled_date: date
     shift: str
     expected_qty: int
@@ -77,6 +81,50 @@ class DeliveryTaskResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ReassignTaskRequest(BaseModel):
+    new_driver_id: uuid.UUID
+    notes: Optional[str] = None
+
+
+class DriverCompletedShipmentResponse(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    customer_id: uuid.UUID
+    customer_name: str
+    customer_phone: str
+    customer_address: str
+    product_name: str
+    delivered_qty: int
+    empty_collected_qty: int
+    cash_collected: float
+    payment_mode: str
+    delivery_status: str
+    delivered_at: datetime
+    notes: Optional[str] = None
+
+
+class DriverDailyStat(BaseModel):
+    date: str
+    delivered_jars: int
+    empty_jars: int
+    cash_collected: float
+    stops_completed: int
+
+
+class DriverMonthlyReportResponse(BaseModel):
+    driver_id: str
+    driver_name: str
+    month: str
+    total_stops: int
+    completed_stops: int
+    partially_completed_stops: int
+    total_jars_delivered: int
+    total_empties_collected: int
+    total_cash_collected: float
+    completion_rate: float
+    daily_stats: List[DriverDailyStat]
 
 
 class DeliveryRecordCreate(BaseModel):
