@@ -1,5 +1,6 @@
 import uuid
 import secrets
+import hashlib
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
@@ -178,7 +179,8 @@ def request_extra_jars(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    idempotency_key = f"{customer.tenant_id}:{customer.id}:{product.id}:{data.delivery_date.isoformat()}:{data.shift}:extra-{secrets.token_hex(3)}"
+    raw_key = f"{customer.tenant_id}:{customer.id}:{product.id}:{data.delivery_date.isoformat()}:{data.shift}:extra-{secrets.token_hex(4)}"
+    idempotency_key = hashlib.sha256(raw_key.encode()).hexdigest()
 
     task = DeliveryTask(
         tenant_id=customer.tenant_id,

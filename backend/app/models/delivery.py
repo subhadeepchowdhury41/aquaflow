@@ -63,7 +63,7 @@ class DeliveryTask(TenantAwareModel):
     status = Column(String(50), default="pending", nullable=False, index=True)
     # pending, in_transit, completed, partially_completed, failed, cancelled
     sequence_order = Column(Integer, default=0, nullable=False)
-    idempotency_key = Column(String(128), unique=True, nullable=False, index=True)
+    idempotency_key = Column(String(255), unique=True, nullable=False, index=True)
 
     customer = relationship("Customer")
     product = relationship("Product")

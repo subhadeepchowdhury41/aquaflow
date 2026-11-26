@@ -1,5 +1,6 @@
 import uuid
 import secrets
+import hashlib
 from datetime import date, datetime, timezone
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -55,8 +56,9 @@ class DeliveryService:
             if not should_deliver:
                 continue
 
-            # Idempotency key per customer + product + date + shift
-            idempotency_key = f"{tenant_id}:{sub.customer_id}:{sub.product_id}:{target_date.isoformat()}:{sub.shift}"
+            # Deterministic, unique idempotency hash per customer + product + date + shift (64 chars)
+            raw_key = f"{tenant_id}:{sub.customer_id}:{sub.product_id}:{target_date.isoformat()}:{sub.shift}"
+            idempotency_key = hashlib.sha256(raw_key.encode()).hexdigest()
 
             existing_task = db.query(DeliveryTask).filter(
                 DeliveryTask.tenant_id == tenant_id,
