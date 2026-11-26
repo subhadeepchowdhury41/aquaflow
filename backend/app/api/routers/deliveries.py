@@ -157,26 +157,31 @@ def trigger_daily_delivery_generation(
 @router.get("/today", response_model=List[DeliveryTaskResponse])
 def get_daily_delivery_tasks(
     target_date: Optional[date] = None,
+    all_dates: Optional[bool] = Query(False),
     driver_id: Optional[uuid.UUID] = Query(None),
     route_id: Optional[uuid.UUID] = Query(None),
     status_filter: Optional[str] = Query(None),
     user: User = Depends(get_current_tenant_user),
     db: Session = Depends(get_db)
 ):
-    """Returns today's dispatch sheet for delivery drivers or dispatch managers."""
+    """Returns dispatch sheet for delivery drivers or dispatch managers for today or any date."""
     chosen_date = target_date or date.today()
     query = db.query(
-        DeliveryTask, Customer, Product, User
+        DeliveryTask, Customer, Product, User, DeliveryRecord
     ).join(
         Customer, DeliveryTask.customer_id == Customer.id
     ).join(
         Product, DeliveryTask.product_id == Product.id
     ).outerjoin(
         User, DeliveryTask.driver_id == User.id
+    ).outerjoin(
+        DeliveryRecord, DeliveryTask.id == DeliveryRecord.delivery_task_id
     ).filter(
-        DeliveryTask.tenant_id == user.tenant_id,
-        DeliveryTask.scheduled_date == chosen_date
+        DeliveryTask.tenant_id == user.tenant_id
     )
+
+    if not all_dates:
+        query = query.filter(DeliveryTask.scheduled_date == chosen_date)
 
     if driver_id:
         query = query.filter(DeliveryTask.driver_id == driver_id)
@@ -186,7 +191,7 @@ def get_daily_delivery_tasks(
         query = query.filter(DeliveryTask.status == status_filter)
 
     results = []
-    for task, cust, prod, drv in query.order_by(DeliveryTask.sequence_order.asc()).all():
+    for task, cust, prod, drv, rec in query.order_by(DeliveryTask.scheduled_date.asc(), DeliveryTask.sequence_order.asc()).all():
         results.append(
             DeliveryTaskResponse(
                 id=task.id,
@@ -209,7 +214,13 @@ def get_daily_delivery_tasks(
                 expected_qty=task.expected_qty,
                 status=task.status,
                 sequence_order=task.sequence_order,
-                idempotency_key=task.idempotency_key
+                idempotency_key=task.idempotency_key,
+                delivered_qty=rec.delivered_qty if rec else None,
+                empty_collected_qty=rec.empty_collected_qty if rec else None,
+                cash_collected=rec.cash_collected if rec else 0.0,
+                payment_mode=rec.payment_mode if rec else None,
+                delivered_at=rec.delivered_at if rec else None,
+                delivery_notes=rec.notes if rec else None
             )
         )
     return results

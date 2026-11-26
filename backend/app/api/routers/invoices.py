@@ -131,6 +131,34 @@ def record_payment(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/payments", response_model=List[PaymentResponse])
+def list_payments(
+    customer_id: Optional[uuid.UUID] = Query(None),
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Lists payments made by customers, optionally filtered by customer_id."""
+    query = db.query(Payment).filter(Payment.tenant_id == user.tenant_id)
+    if customer_id:
+        query = query.filter(Payment.customer_id == customer_id)
+    payments = query.order_by(Payment.payment_date.desc()).limit(200).all()
+    return [
+        PaymentResponse(
+            id=p.id,
+            tenant_id=p.tenant_id,
+            customer_id=p.customer_id,
+            invoice_id=p.invoice_id,
+            payment_number=p.payment_number,
+            amount=p.amount,
+            payment_method=p.payment_method,
+            payment_ref_id=p.payment_ref_id,
+            status=p.status,
+            payment_date=p.payment_date
+        )
+        for p in payments
+    ]
+
+
 @router.get("/expenses", response_model=List[ExpenseResponse])
 def list_expenses(
     branch_id: Optional[uuid.UUID] = Query(None),

@@ -78,6 +78,12 @@ class DeliveryTaskResponse(BaseModel):
     status: str
     sequence_order: int
     idempotency_key: str
+    delivered_qty: Optional[int] = None
+    empty_collected_qty: Optional[int] = None
+    cash_collected: Optional[float] = 0.0
+    payment_mode: Optional[str] = None
+    delivered_at: Optional[datetime] = None
+    delivery_notes: Optional[str] = None
 
     class Config:
         from_attributes = True
