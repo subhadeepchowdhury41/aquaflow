@@ -22,8 +22,10 @@ class InvoiceResponse(BaseModel):
     tenant_id: uuid.UUID
     customer_id: uuid.UUID
     customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
     branch_id: uuid.UUID
     order_id: Optional[uuid.UUID] = None
+    order_number: Optional[str] = None
     invoice_number: str
     billing_period_start: date
     billing_period_end: date
@@ -43,6 +45,16 @@ class InvoiceResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PaginatedInvoicesResponse(BaseModel):
+    items: List[InvoiceResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    total_amount_filtered: float
+    total_balance_due_filtered: float
 
 
 class InvoiceGenerateMonthlyRequest(BaseModel):

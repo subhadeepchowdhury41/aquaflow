@@ -1,10 +1,12 @@
 import uuid
 import secrets
 import hashlib
+import math
 from datetime import date, datetime, timezone, timedelta
 from typing import List, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.dependencies import get_token_payload
@@ -391,18 +393,59 @@ def submit_service_ticket(
 
 @router.get("/ledger")
 def get_customer_due_and_ledger_statement(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(15, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    direction: Optional[str] = Query(None),  # charge | payment
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     customer: Customer = Depends(get_current_portal_customer),
     db: Session = Depends(get_db)
 ):
-    """Returns complete ledger statement showing all debits, credits, and running balance."""
-    entries = db.query(CustomerLedger).filter(
+    """Returns paginated & filterable ledger statement showing charges, payments, and running balance."""
+    query = db.query(CustomerLedger).filter(
         CustomerLedger.customer_id == customer.id,
         CustomerLedger.tenant_id == customer.tenant_id
-    ).order_by(CustomerLedger.transaction_date.desc()).all()
+    )
+
+    if direction == "charge":
+        query = query.filter(CustomerLedger.debit_amount > 0)
+    elif direction == "payment":
+        query = query.filter(CustomerLedger.credit_amount > 0)
+
+    if date_from:
+        dt_start = datetime(date_from.year, date_from.month, date_from.day, tzinfo=timezone.utc)
+        query = query.filter(CustomerLedger.transaction_date >= dt_start)
+    if date_to:
+        dt_end = datetime(date_to.year, date_to.month, date_to.day, tzinfo=timezone.utc) + timedelta(days=1)
+        query = query.filter(CustomerLedger.transaction_date < dt_end)
+
+    if search and search.strip():
+        pat = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                CustomerLedger.notes.ilike(pat),
+                CustomerLedger.transaction_type.ilike(pat),
+                CustomerLedger.reference_type.ilike(pat),
+            )
+        )
+
+    total = query.count()
+    total_pages = max(1, math.ceil(total / page_size))
+    entries = (
+        query.order_by(CustomerLedger.transaction_date.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     return {
         "current_balance": customer.current_balance,
         "jar_balance": customer.jar_balance,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
         "transactions": [
             {
                 "id": e.id,

@@ -15,6 +15,7 @@ from app.models.delivery import DeliveryTask
 from app.models.product import Product
 from app.schemas.finance import (
     InvoiceResponse,
+    PaginatedInvoicesResponse,
     InvoiceItemSchema,
     InvoiceGenerateMonthlyRequest,
     PaymentCreate,
@@ -29,6 +30,47 @@ from app.services.billing_service import BillingService
 router = APIRouter(prefix="/invoices", tags=["Billing & Payments"])
 
 
+def _serialize_invoice(inv: Invoice, cust: Customer, order: Optional[DeliveryTask] = None) -> InvoiceResponse:
+    items_schema = [
+        InvoiceItemSchema(
+            product_id=it.product_id,
+            description=it.description,
+            quantity=it.quantity,
+            unit_price=it.unit_price,
+            gst_rate=it.gst_rate,
+            tax_amount=it.tax_amount,
+            total_amount=it.total_amount
+        )
+        for it in inv.items
+    ]
+    return InvoiceResponse(
+        id=inv.id,
+        tenant_id=inv.tenant_id,
+        customer_id=inv.customer_id,
+        customer_name=cust.name,
+        customer_phone=cust.phone,
+        branch_id=inv.branch_id,
+        order_id=inv.order_id,
+        order_number=order.order_number if order else None,
+        invoice_number=inv.invoice_number,
+        billing_period_start=inv.billing_period_start,
+        billing_period_end=inv.billing_period_end,
+        due_date=inv.due_date,
+        subtotal=inv.subtotal,
+        cgst_amount=inv.cgst_amount,
+        sgst_amount=inv.sgst_amount,
+        igst_amount=inv.igst_amount,
+        total_tax=inv.total_tax,
+        total_amount=inv.total_amount,
+        paid_amount=inv.paid_amount,
+        balance_due=inv.balance_due,
+        status=inv.status,
+        pdf_url=inv.pdf_url,
+        created_at=inv.created_at,
+        items=items_schema
+    )
+
+
 @router.get("", response_model=List[InvoiceResponse])
 def list_invoices(
     customer_id: Optional[uuid.UUID] = Query(None),
@@ -37,8 +79,10 @@ def list_invoices(
     db: Session = Depends(get_db)
 ):
     """Lists customer invoices with GST tax breakdowns and outstanding balances."""
-    query = db.query(Invoice, Customer).join(
+    query = db.query(Invoice, Customer, DeliveryTask).join(
         Customer, Invoice.customer_id == Customer.id
+    ).outerjoin(
+        DeliveryTask, Invoice.order_id == DeliveryTask.id
     ).filter(Invoice.tenant_id == user.tenant_id)
 
     if customer_id:
@@ -46,47 +90,60 @@ def list_invoices(
     if status_filter:
         query = query.filter(Invoice.status == status_filter)
 
-    results = []
-    for inv, cust in query.order_by(Invoice.created_at.desc()).all():
-        items_schema = [
-            InvoiceItemSchema(
-                product_id=it.product_id,
-                description=it.description,
-                quantity=it.quantity,
-                unit_price=it.unit_price,
-                gst_rate=it.gst_rate,
-                tax_amount=it.tax_amount,
-                total_amount=it.total_amount
-            )
-            for it in inv.items
-        ]
-        results.append(
-            InvoiceResponse(
-                id=inv.id,
-                tenant_id=inv.tenant_id,
-                customer_id=inv.customer_id,
-                customer_name=cust.name,
-                branch_id=inv.branch_id,
-                order_id=inv.order_id,
-                invoice_number=inv.invoice_number,
-                billing_period_start=inv.billing_period_start,
-                billing_period_end=inv.billing_period_end,
-                due_date=inv.due_date,
-                subtotal=inv.subtotal,
-                cgst_amount=inv.cgst_amount,
-                sgst_amount=inv.sgst_amount,
-                igst_amount=inv.igst_amount,
-                total_tax=inv.total_tax,
-                total_amount=inv.total_amount,
-                paid_amount=inv.paid_amount,
-                balance_due=inv.balance_due,
-                status=inv.status,
-                pdf_url=inv.pdf_url,
-                created_at=inv.created_at,
-                items=items_schema
+    return [_serialize_invoice(inv, cust, order) for inv, cust, order in query.order_by(Invoice.created_at.desc()).all()]
+
+
+@router.get("/paginated", response_model=PaginatedInvoicesResponse)
+def list_invoices_paginated(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(15, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Paginated & filtered invoices listing with search, status, and date range filters."""
+    query = db.query(Invoice, Customer, DeliveryTask).join(
+        Customer, Invoice.customer_id == Customer.id
+    ).outerjoin(
+        DeliveryTask, Invoice.order_id == DeliveryTask.id
+    ).filter(Invoice.tenant_id == user.tenant_id)
+
+    if status_filter:
+        query = query.filter(Invoice.status == status_filter)
+    if date_from:
+        query = query.filter(Invoice.billing_period_start >= date_from)
+    if date_to:
+        query = query.filter(Invoice.billing_period_start <= date_to)
+    if search:
+        pat = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                Invoice.invoice_number.ilike(pat),
+                Customer.name.ilike(pat),
+                Customer.phone.ilike(pat),
+                Customer.customer_code.ilike(pat),
+                DeliveryTask.order_number.ilike(pat),
             )
         )
-    return results
+
+    total = query.count()
+    total_amount_filtered = float(query.with_entities(func.coalesce(func.sum(Invoice.total_amount), 0.0)).scalar() or 0.0)
+    total_balance_due_filtered = float(query.with_entities(func.coalesce(func.sum(Invoice.balance_due), 0.0)).scalar() or 0.0)
+    total_pages = max(1, math.ceil(total / page_size))
+
+    rows = query.order_by(Invoice.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return PaginatedInvoicesResponse(
+        items=[_serialize_invoice(inv, cust, order) for inv, cust, order in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        total_amount_filtered=round(total_amount_filtered, 2),
+        total_balance_due_filtered=round(total_balance_due_filtered, 2),
+    )
 
 
 @router.post("/generate-monthly")

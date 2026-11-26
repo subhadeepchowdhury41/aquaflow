@@ -28,7 +28,11 @@ import {
   Sparkles,
   HelpCircle,
   Layers,
-  FileText
+  FileText,
+  Search,
+  Filter,
+  ChevronLeft,
+  RotateCcw
 } from 'lucide-react';
 
 interface SupplierInfo {
@@ -158,11 +162,42 @@ export const CustomerPortal: React.FC = () => {
   
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [deliveries, setDeliveries] = useState<DeliveryOrder[]>([]);
-  const [ledgerData, setLedgerData] = useState<{ current_balance: number; jar_balance: number; transactions: LedgerTx[] }>({
+  const [ledgerData, setLedgerData] = useState<{
+    current_balance: number;
+    jar_balance: number;
+    transactions: LedgerTx[];
+    total: number;
+    page: number;
+    page_size: number;
+    total_pages: number;
+  }>({
     current_balance: 0,
     jar_balance: 0,
-    transactions: []
+    transactions: [],
+    total: 0,
+    page: 1,
+    page_size: 15,
+    total_pages: 1,
   });
+  const [ledgerPage, setLedgerPage] = useState(1);
+  const [ledgerPageSize, setLedgerPageSize] = useState(15);
+  const [ledgerSearch, setLedgerSearch] = useState('');
+  const [ledgerDirection, setLedgerDirection] = useState('');
+  const [ledgerDateFrom, setLedgerDateFrom] = useState('');
+  const [ledgerDateTo, setLedgerDateTo] = useState('');
+  const [loadingLedger, setLoadingLedger] = useState(false);
+
+  // Customer-facing balance helpers:
+  // DB current_balance > 0 means owed/due (show negative -₹X), DB current_balance < 0 means advance (show positive +₹X).
+  const toCustomerBalance = (dbBalance: number) => {
+    const val = -(dbBalance || 0);
+    return Math.abs(val) < 0.005 ? 0 : val;
+  };
+  const formatCustomerBalance = (custBal: number) => {
+    if (custBal > 0) return `+₹${custBal.toFixed(2)}`;
+    if (custBal < 0) return `-₹${Math.abs(custBal).toFixed(2)}`;
+    return '₹0.00';
+  };
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [tickets, setTickets] = useState<ServiceTicket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -204,20 +239,57 @@ export const CustomerPortal: React.FC = () => {
   const [payDuesFeedback, setPayDuesFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [submittingPayDues, setSubmittingPayDues] = useState(false);
 
+  const buildLedgerParams = (targetPage = ledgerPage) => {
+    const params: Record<string, any> = { page: targetPage, page_size: ledgerPageSize };
+    if (ledgerSearch.trim()) params.search = ledgerSearch.trim();
+    if (ledgerDirection) params.direction = ledgerDirection;
+    if (ledgerDateFrom) params.date_from = ledgerDateFrom;
+    if (ledgerDateTo) params.date_to = ledgerDateTo;
+    return params;
+  };
+
+  const fetchLedgerOnly = async (targetPage = ledgerPage) => {
+    try {
+      setLoadingLedger(true);
+      const res = await apiClient.get('/portal/ledger', { params: buildLedgerParams(targetPage) });
+      setLedgerData({
+        current_balance: res.data.current_balance || 0,
+        jar_balance: res.data.jar_balance || 0,
+        transactions: res.data.transactions || [],
+        total: res.data.total ?? (res.data.transactions?.length || 0),
+        page: res.data.page || targetPage,
+        page_size: res.data.page_size || ledgerPageSize,
+        total_pages: res.data.total_pages || 1,
+      });
+    } catch (err) {
+      console.error('Failed to load ledger', err);
+    } finally {
+      setLoadingLedger(false);
+    }
+  };
+
   const fetchPortalData = async () => {
     try {
       setLoading(true);
       const [profRes, delivRes, ledgerRes, invRes, reqRes] = await Promise.all([
         apiClient.get('/portal/me'),
         apiClient.get('/portal/deliveries'),
-        apiClient.get('/portal/ledger'),
+        apiClient.get('/portal/ledger', { params: buildLedgerParams(ledgerPage) }),
         apiClient.get('/portal/invoices'),
         apiClient.get('/portal/requests')
       ]);
 
       setProfile(profRes.data);
       setDeliveries(delivRes.data);
-      setLedgerData(ledgerRes.data);
+      setLedgerData({
+        current_balance: ledgerRes.data.current_balance || 0,
+        jar_balance: ledgerRes.data.jar_balance || 0,
+        transactions: ledgerRes.data.transactions || [],
+        total: ledgerRes.data.total ?? (ledgerRes.data.transactions?.length || 0),
+        page: ledgerRes.data.page || ledgerPage,
+        page_size: ledgerRes.data.page_size || ledgerPageSize,
+        total_pages: ledgerRes.data.total_pages || 1,
+      });
       setInvoices(invRes.data);
       setTickets(reqRes.data);
       if (profRes.data.current_balance > 0) {
@@ -233,6 +305,12 @@ export const CustomerPortal: React.FC = () => {
   useEffect(() => {
     fetchPortalData();
   }, []);
+
+  useEffect(() => {
+    if (!loading) {
+      fetchLedgerOnly(ledgerPage);
+    }
+  }, [ledgerPage, ledgerPageSize, ledgerDirection, ledgerDateFrom, ledgerDateTo]);
 
   const handleOrderExtra = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -356,32 +434,46 @@ export const CustomerPortal: React.FC = () => {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 w-full space-y-6 flex-1">
         {/* Profile & KPI Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* 1. Account Due Balance */}
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <div className="flex justify-between items-center text-xs font-semibold text-slate-500">
-                <span>Account Balance</span>
-                <IndianRupee className="w-4 h-4 text-slate-400" />
-              </div>
-              <div className={`mt-2 text-2xl font-extrabold font-mono ${
-                (profile?.current_balance || 0) > 0 ? 'text-rose-600' : 'text-emerald-600'
-              }`}>
-                ₹{profile?.current_balance?.toFixed(2) || '0.00'}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                {(profile?.current_balance || 0) > 0 ? 'Total outstanding due' : 'Account in good standing'}
-              </div>
-            </div>
+          {/* 1. Account Wallet / Due Balance (Positive = Advance, Negative = Due) */}
+          {(() => {
+            const custBal = toCustomerBalance(profile?.current_balance || 0);
+            const hasDue = (profile?.current_balance || 0) > 0.005;
+            return (
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden flex flex-col justify-between">
+                <div>
+                  <div className="flex justify-between items-center text-xs font-semibold text-slate-500">
+                    <span>Account Balance</span>
+                    <IndianRupee className="w-4 h-4 text-slate-400" />
+                  </div>
+                  <div className={`mt-2 text-2xl font-extrabold font-mono ${
+                    custBal < 0 ? 'text-rose-600' : 'text-emerald-600'
+                  }`}>
+                    {formatCustomerBalance(custBal)}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">
+                    {custBal < 0
+                      ? 'Unpaid amount due'
+                      : custBal > 0
+                      ? 'Advance credit balance'
+                      : 'All dues settled'}
+                  </div>
+                </div>
 
-            {(profile?.current_balance || 0) > 0 && (
-              <button
-                onClick={() => setIsPayDuesOpen(true)}
-                className="mt-4 w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shadow-sm transition"
-              >
-                Pay Dues Online
-              </button>
-            )}
-          </div>
+                {hasDue && (
+                  <button
+                    onClick={() => {
+                      setPayDuesFeedback(null);
+                      setPayAmount(profile?.current_balance || 0);
+                      setIsPayDuesOpen(true);
+                    }}
+                    className="mt-4 w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shadow-sm transition"
+                  >
+                    Pay Dues Online
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
           {/* 2. Jar Holding Balance */}
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
@@ -605,16 +697,22 @@ export const CustomerPortal: React.FC = () => {
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
-                <h3 className="font-bold text-base text-slate-900">Ledger Statement & Dues History</h3>
-                <p className="text-xs text-slate-500">Audit trail of delivery charges, payment receipts, and balance changes</p>
+                <h3 className="font-bold text-base text-slate-900">Ledger Statement &amp; Dues History</h3>
+                <p className="text-xs text-slate-500">Audit trail of charges (-), payments (+), and running balance (+ advance / - due)</p>
               </div>
-              <button
-                onClick={() => setIsPayDuesOpen(true)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1.5"
-              >
-                <CreditCard className="w-4 h-4" />
-                <span>Pay Outstanding Dues</span>
-              </button>
+              {(ledgerData.current_balance || 0) > 0.005 && (
+                <button
+                  onClick={() => {
+                    setPayDuesFeedback(null);
+                    setPayAmount(ledgerData.current_balance || 0);
+                    setIsPayDuesOpen(true);
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-sm transition flex items-center space-x-1.5"
+                >
+                  <CreditCard className="w-4 h-4" />
+                  <span>Pay Outstanding Dues</span>
+                </button>
+              )}
             </div>
 
             {/* Invoices Overview */}
@@ -654,13 +752,97 @@ export const CustomerPortal: React.FC = () => {
               </div>
             )}
 
-            {/* Immutable Account Ledger Table */}
+            {/* Immutable Account Ledger Table with Search, Filters & Pagination */}
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-              <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+              <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
                 <span className="font-bold text-xs text-slate-700">Detailed Transaction Ledger</span>
-                <span className="text-xs font-mono font-bold text-slate-900">
-                  Net Balance: ₹{ledgerData.current_balance.toFixed(2)}
+                <span className={`text-xs font-mono font-bold ${
+                  toCustomerBalance(ledgerData.current_balance) < 0 ? 'text-rose-600' : 'text-emerald-600'
+                }`}>
+                  Net Balance: {formatCustomerBalance(toCustomerBalance(ledgerData.current_balance))}
                 </span>
+              </div>
+
+              {/* Ledger Search & Filters */}
+              <div className="p-3.5 border-b border-slate-100 bg-white flex flex-wrap items-center gap-2.5">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setLedgerPage(1);
+                    fetchLedgerOnly(1);
+                  }}
+                  className="relative flex-1 min-w-[200px]"
+                >
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    value={ledgerSearch}
+                    onChange={(e) => setLedgerSearch(e.target.value)}
+                    placeholder="Search notes, order #, receipt #..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-16 py-1.5 text-xs focus:outline-none focus:border-brand-500"
+                  />
+                  <button
+                    type="submit"
+                    className="absolute right-1 top-1 px-2.5 py-0.5 bg-brand-600 text-white rounded text-[11px] font-bold"
+                  >
+                    Search
+                  </button>
+                </form>
+
+                <div className="flex items-center space-x-1">
+                  <Filter className="w-3.5 h-3.5 text-slate-400" />
+                  <select
+                    value={ledgerDirection}
+                    onChange={(e) => {
+                      setLedgerDirection(e.target.value);
+                      setLedgerPage(1);
+                    }}
+                    className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold bg-white text-slate-700"
+                  >
+                    <option value="">All Entries</option>
+                    <option value="charge">Charges (-)</option>
+                    <option value="payment">Payments (+)</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-1 text-xs">
+                  <input
+                    type="date"
+                    value={ledgerDateFrom}
+                    onChange={(e) => {
+                      setLedgerDateFrom(e.target.value);
+                      setLedgerPage(1);
+                    }}
+                    className="px-2 py-1 border border-slate-200 rounded-lg text-xs"
+                    title="From Date"
+                  />
+                  <span className="text-slate-400">to</span>
+                  <input
+                    type="date"
+                    value={ledgerDateTo}
+                    onChange={(e) => {
+                      setLedgerDateTo(e.target.value);
+                      setLedgerPage(1);
+                    }}
+                    className="px-2 py-1 border border-slate-200 rounded-lg text-xs"
+                    title="To Date"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLedgerSearch('');
+                    setLedgerDirection('');
+                    setLedgerDateFrom('');
+                    setLedgerDateTo('');
+                    setLedgerPage(1);
+                  }}
+                  className="px-2.5 py-1.5 border border-slate-200 hover:bg-slate-50 rounded-lg text-xs font-semibold text-slate-600 inline-flex items-center space-x-1"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset</span>
+                </button>
               </div>
 
               <div className="overflow-x-auto">
@@ -669,48 +851,99 @@ export const CustomerPortal: React.FC = () => {
                     <tr>
                       <th className="p-4">Date</th>
                       <th className="p-4">Transaction / Description</th>
-                      <th className="p-4 text-right">Debit Charge (+)</th>
-                      <th className="p-4 text-right">Payment Credit (-)</th>
+                      <th className="p-4 text-right">Charged (-)</th>
+                      <th className="p-4 text-right">Paid / Added (+)</th>
                       <th className="p-4 text-right">Running Balance</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {ledgerData.transactions.map((tx) => (
-                      <tr key={tx.id} className="hover:bg-slate-50/70 transition">
-                        <td className="p-4 text-slate-500 whitespace-nowrap">
-                          {new Date(tx.transaction_date).toLocaleDateString()}
-                        </td>
-                        <td className="p-4">
-                          <div className="font-bold text-slate-800 capitalize flex items-center space-x-1.5">
-                            {tx.debit_amount > 0 ? (
-                              <ArrowUpRight className="w-3.5 h-3.5 text-rose-500" />
-                            ) : (
-                              <ArrowDownLeft className="w-3.5 h-3.5 text-emerald-500" />
-                            )}
-                            <span>{tx.transaction_type.replace('_', ' ')}</span>
-                          </div>
-                          <div className="text-[11px] text-slate-400">{tx.notes}</div>
-                        </td>
-                        <td className="p-4 text-right font-mono font-semibold text-rose-600">
-                          {tx.debit_amount > 0 ? `+₹${tx.debit_amount.toFixed(2)}` : '-'}
-                        </td>
-                        <td className="p-4 text-right font-mono font-semibold text-emerald-600">
-                          {tx.credit_amount > 0 ? `-₹${tx.credit_amount.toFixed(2)}` : '-'}
-                        </td>
-                        <td className="p-4 text-right font-mono font-bold text-slate-900">
-                          ₹{tx.running_balance.toFixed(2)}
-                        </td>
-                      </tr>
-                    ))}
-                    {ledgerData.transactions.length === 0 && (
+                    {ledgerData.transactions.map((tx) => {
+                      const rowCustBal = toCustomerBalance(tx.running_balance);
+                      return (
+                        <tr key={tx.id} className="hover:bg-slate-50/70 transition">
+                          <td className="p-4 text-slate-500 whitespace-nowrap">
+                            {new Date(tx.transaction_date).toLocaleDateString()}
+                          </td>
+                          <td className="p-4">
+                            <div className="font-bold text-slate-800 capitalize flex items-center space-x-1.5">
+                              {tx.debit_amount > 0 ? (
+                                <ArrowUpRight className="w-3.5 h-3.5 text-rose-500" />
+                              ) : (
+                                <ArrowDownLeft className="w-3.5 h-3.5 text-emerald-500" />
+                              )}
+                              <span>{tx.transaction_type.replace('_', ' ')}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-400">{tx.notes}</div>
+                          </td>
+                          <td className="p-4 text-right font-mono font-semibold text-rose-600">
+                            {tx.debit_amount > 0 ? `-₹${tx.debit_amount.toFixed(2)}` : '-'}
+                          </td>
+                          <td className="p-4 text-right font-mono font-semibold text-emerald-600">
+                            {tx.credit_amount > 0 ? `+₹${tx.credit_amount.toFixed(2)}` : '-'}
+                          </td>
+                          <td className={`p-4 text-right font-mono font-bold ${
+                            rowCustBal < 0 ? 'text-rose-600' : 'text-emerald-600'
+                          }`}>
+                            {formatCustomerBalance(rowCustBal)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {!loadingLedger && ledgerData.transactions.length === 0 && (
                       <tr>
                         <td colSpan={5} className="p-8 text-center text-slate-400">
-                          No ledger transactions on record.
+                          No ledger transactions found matching current filters.
                         </td>
                       </tr>
                     )}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Ledger Pagination Footer */}
+              <div className="px-4 py-3 bg-slate-50 border-t border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-3 text-xs text-slate-600">
+                <div className="flex items-center space-x-3">
+                  <span>
+                    Showing <strong>{ledgerData.total === 0 ? 0 : (ledgerData.page - 1) * ledgerData.page_size + 1}</strong>–
+                    <strong>{Math.min(ledgerData.total, ledgerData.page * ledgerData.page_size)}</strong> of{' '}
+                    <strong>{ledgerData.total}</strong> entries
+                  </span>
+                  <select
+                    value={ledgerPageSize}
+                    onChange={(e) => {
+                      setLedgerPageSize(parseInt(e.target.value, 10));
+                      setLedgerPage(1);
+                    }}
+                    className="px-2 py-1 border border-slate-200 rounded-lg bg-white text-xs font-semibold"
+                  >
+                    <option value={10}>10 / page</option>
+                    <option value={15}>15 / page</option>
+                    <option value={25}>25 / page</option>
+                    <option value={50}>50 / page</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-1.5">
+                  <button
+                    disabled={ledgerData.page <= 1}
+                    onClick={() => setLedgerPage((p) => Math.max(1, p - 1))}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold inline-flex items-center space-x-1"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Prev</span>
+                  </button>
+                  <span className="px-2.5 py-1 font-mono font-bold text-slate-800">
+                    Page {ledgerData.page} of {ledgerData.total_pages}
+                  </span>
+                  <button
+                    disabled={ledgerData.page >= ledgerData.total_pages}
+                    onClick={() => setLedgerPage((p) => Math.min(ledgerData.total_pages, p + 1))}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold inline-flex items-center space-x-1"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           </div>
