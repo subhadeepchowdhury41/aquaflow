@@ -264,3 +264,12 @@ class DeliveryRecordCreate(BaseModel):
 class OfflineSyncBatch(BaseModel):
     actions: List[DeliveryRecordCreate]
 
+
+class PaginatedOrdersResponse(BaseModel):
+    items: List[DeliveryTaskResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    status_counts: dict[str, int]
+

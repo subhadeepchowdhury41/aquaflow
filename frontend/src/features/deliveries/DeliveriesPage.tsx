@@ -151,6 +151,13 @@ export const DeliveriesPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
+  // Pagination state
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+
   const getTodayStr = () => new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
   const [allDatesMode, setAllDatesMode] = useState<boolean>(false);
@@ -216,16 +223,37 @@ export const DeliveriesPage: React.FC = () => {
     }
   };
 
-  const loadTasks = async () => {
+  const loadTasks = async (targetPage = page, searchOverride?: string) => {
     try {
       setLoading(true);
-      const params: Record<string, any> = allDatesMode ? { all_dates: true } : { target_date: selectedDate };
+      const activeSearch = searchOverride !== undefined ? searchOverride : search;
+      const params: Record<string, any> = {
+        page: targetPage,
+        page_size: pageSize,
+      };
+      if (allDatesMode) {
+        params.all_dates = true;
+      } else {
+        params.target_date = selectedDate;
+      }
+      if (filter && filter !== 'all') {
+        params.status_filter = filter;
+      }
+      if (activeSearch.trim()) {
+        params.search = activeSearch.trim();
+      }
+
       const [res, reqRes] = await Promise.all([
-        apiClient.get('/deliveries/today', { params }),
-        apiClient.get('/deliveries/today', { params: { all_dates: true, status_filter: 'requested' } }),
+        apiClient.get('/deliveries/orders/paginated', { params }),
+        apiClient.get('/deliveries/orders/paginated', {
+          params: { all_dates: true, status_filter: 'requested', page: 1, page_size: 1 },
+        }),
       ]);
-      setTasks(res.data);
-      setRequestedCountAllDates(Array.isArray(reqRes.data) ? reqRes.data.length : 0);
+      setTasks(res.data.items || []);
+      setTotal(res.data.total || 0);
+      setTotalPages(res.data.total_pages || 1);
+      setStatusCounts(res.data.status_counts || {});
+      setRequestedCountAllDates(reqRes.data?.total || 0);
     } catch (err) {
       console.error('Failed to load orders', err);
     } finally {
@@ -247,8 +275,8 @@ export const DeliveriesPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadTasks();
-  }, [selectedDate, allDatesMode]);
+    loadTasks(page);
+  }, [selectedDate, allDatesMode, filter, page, pageSize]);
 
   // Open linked order when navigated from Universal Payments (?orderId=...)
   useEffect(() => {
@@ -272,11 +300,13 @@ export const DeliveriesPage: React.FC = () => {
     const d = new Date(selectedDate);
     d.setDate(d.getDate() + days);
     setSelectedDate(d.toISOString().split('T')[0]);
+    setPage(1);
   };
 
   const setDateToToday = () => {
     setAllDatesMode(false);
     setSelectedDate(getTodayStr());
+    setPage(1);
   };
 
   const setDateToTomorrow = () => {
@@ -284,6 +314,7 @@ export const DeliveriesPage: React.FC = () => {
     const d = new Date();
     d.setDate(d.getDate() + 1);
     setSelectedDate(d.toISOString().split('T')[0]);
+    setPage(1);
   };
 
   // Open Assign Shipment modal
@@ -495,16 +526,8 @@ export const DeliveriesPage: React.FC = () => {
     }
   };
 
-  const filteredTasks = tasks.filter((t) => {
-    const matchesFilter = filter === 'all' || t.status === filter;
-    const q = search.toLowerCase();
-    const matchesSearch =
-      t.customer_name?.toLowerCase().includes(q) ||
-      t.customer_phone?.includes(search) ||
-      t.customer_address?.toLowerCase().includes(q) ||
-      t.order_number?.toLowerCase().includes(q);
-    return matchesFilter && matchesSearch;
-  });
+  const startIdx = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const endIdx = Math.min(total, page * pageSize);
 
   const isToday = selectedDate === getTodayStr() && !allDatesMode;
   const isTomorrow = (() => {
@@ -530,6 +553,7 @@ export const DeliveriesPage: React.FC = () => {
             onClick={() => {
               setAllDatesMode(true);
               setFilter('requested');
+              setPage(1);
             }}
             className="px-3.5 py-1.5 bg-white text-indigo-700 rounded-xl text-xs font-extrabold hover:bg-indigo-50 transition shadow-sm"
           >
@@ -606,13 +630,17 @@ export const DeliveriesPage: React.FC = () => {
               onChange={(e) => {
                 setAllDatesMode(false);
                 setSelectedDate(e.target.value);
+                setPage(1);
               }}
               className="text-xs font-medium text-slate-800 bg-transparent focus:outline-none cursor-pointer"
             />
           </div>
 
           <button
-            onClick={() => setAllDatesMode(!allDatesMode)}
+            onClick={() => {
+              setAllDatesMode(!allDatesMode);
+              setPage(1);
+            }}
             className={`px-3 py-1.5 rounded-xl text-xs font-bold transition border ${
               allDatesMode
                 ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
@@ -623,7 +651,7 @@ export const DeliveriesPage: React.FC = () => {
           </button>
 
           <button
-            onClick={loadTasks}
+            onClick={() => loadTasks(page)}
             className="p-2 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-600 transition"
             title="Refresh Orders"
           >
@@ -636,11 +664,14 @@ export const DeliveriesPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row justify-between items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
         <div className="flex space-x-1 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
           {statusTabs.map((f) => {
-            const count = tasks.filter((t) => (f === 'all' ? true : t.status === f)).length;
+            const count = statusCounts[f] ?? 0;
             return (
               <button
                 key={f}
-                onClick={() => setFilter(f)}
+                onClick={() => {
+                  setFilter(f);
+                  setPage(1);
+                }}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold capitalize whitespace-nowrap transition ${
                   filter === f
                     ? 'bg-brand-600 text-white shadow-sm'
@@ -653,16 +684,44 @@ export const DeliveriesPage: React.FC = () => {
           })}
         </div>
 
-        <div className="relative w-full sm:w-80">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search order #, customer, phone, address..."
-            className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-brand-500"
-          />
-        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (page !== 1) setPage(1);
+            else loadTasks(1);
+          }}
+          className="relative w-full sm:w-96 flex items-center gap-1.5"
+        >
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search order #, customer, phone, address..."
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-16 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-brand-500"
+            />
+            <button
+              type="submit"
+              className="absolute right-1 top-1 px-2.5 py-0.5 bg-brand-600 hover:bg-brand-700 text-white rounded text-[11px] font-bold"
+            >
+              Search
+            </button>
+          </div>
+          {search && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch('');
+                if (page !== 1) setPage(1);
+                else loadTasks(1, '');
+              }}
+              className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              Clear
+            </button>
+          )}
+        </form>
       </div>
 
       {/* Orders Table (NO Assigned Driver column as requested) */}
@@ -680,7 +739,7 @@ export const DeliveriesPage: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
-              {filteredTasks.map((t) => (
+              {tasks.map((t) => (
                 <tr key={t.id} className="hover:bg-slate-50/70 transition">
                   {/* Order & Customer */}
                   <td className="p-4">
@@ -804,7 +863,7 @@ export const DeliveriesPage: React.FC = () => {
                   </td>
                 </tr>
               ))}
-              {filteredTasks.length === 0 && (
+              {!loading && tasks.length === 0 && (
                 <tr>
                   <td colSpan={6} className="p-12 text-center text-slate-400 text-xs">
                     <Truck className="w-8 h-8 mx-auto mb-2 text-slate-300" />
@@ -815,7 +874,13 @@ export const DeliveriesPage: React.FC = () => {
                           Check Tomorrow&apos;s Orders &rarr;
                         </button>
                         {' or '}
-                        <button onClick={() => setAllDatesMode(true)} className="text-purple-600 font-bold hover:underline">
+                        <button
+                          onClick={() => {
+                            setAllDatesMode(true);
+                            setPage(1);
+                          }}
+                          className="text-purple-600 font-bold hover:underline"
+                        >
                           View All Dates
                         </button>
                       </div>
@@ -825,6 +890,50 @@ export const DeliveriesPage: React.FC = () => {
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Orders Pagination Footer */}
+        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row justify-between items-center gap-3 text-xs text-slate-600">
+          <div className="flex items-center space-x-3">
+            <span>
+              Showing <strong>{startIdx}</strong>–<strong>{endIdx}</strong> of <strong>{total}</strong> orders
+            </span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(parseInt(e.target.value, 10));
+                setPage(1);
+              }}
+              className="px-2 py-1 border border-slate-200 rounded-lg bg-white text-xs font-semibold"
+            >
+              <option value={10}>10 / page</option>
+              <option value={15}>15 / page</option>
+              <option value={25}>25 / page</option>
+              <option value={50}>50 / page</option>
+            </select>
+          </div>
+
+          <div className="flex items-center space-x-1.5">
+            <button
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold inline-flex items-center space-x-1"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              <span>Prev</span>
+            </button>
+            <span className="px-3 py-1 font-mono font-bold text-slate-800">
+              Page {page} of {totalPages}
+            </span>
+            <button
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2.5 py-1.5 border border-slate-200 rounded-lg bg-white hover:bg-slate-100 disabled:opacity-40 font-semibold inline-flex items-center space-x-1"
+            >
+              <span>Next</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 

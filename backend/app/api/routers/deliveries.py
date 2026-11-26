@@ -1,7 +1,9 @@
 import uuid
+import math
 from datetime import date, datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.api.dependencies import get_current_tenant_user, get_current_verified_tenant, require_permission
@@ -30,6 +32,7 @@ from app.schemas.delivery import (
     OwnerOrderCreateRequest,
     CompleteShipmentRequest,
     DriverShipmentResponse,
+    PaginatedOrdersResponse,
 )
 from app.services.delivery_service import DeliveryService
 from app.services.billing_service import BillingService
@@ -357,6 +360,83 @@ def create_owner_order(
         return _serialize_order(db, order, cust, prod)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/orders/paginated", response_model=PaginatedOrdersResponse)
+def get_paginated_orders(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(15, ge=1, le=100),
+    target_date: Optional[date] = None,
+    all_dates: Optional[bool] = Query(False),
+    status_filter: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    user: User = Depends(get_current_tenant_user),
+    db: Session = Depends(get_db)
+):
+    """Returns paginated & filtered orders with cross-page status counts for the owner deliveries board."""
+    chosen_date = target_date or date.today()
+    base_query = db.query(
+        DeliveryTask, Customer, Product, DeliveryRecord
+    ).join(
+        Customer, DeliveryTask.customer_id == Customer.id
+    ).join(
+        Product, DeliveryTask.product_id == Product.id
+    ).outerjoin(
+        DeliveryRecord, DeliveryTask.id == DeliveryRecord.delivery_task_id
+    ).filter(
+        DeliveryTask.tenant_id == user.tenant_id
+    )
+
+    if not all_dates:
+        base_query = base_query.filter(DeliveryTask.scheduled_date == chosen_date)
+
+    if search and search.strip():
+        pat = f"%{search.strip()}%"
+        base_query = base_query.filter(
+            or_(
+                DeliveryTask.order_number.ilike(pat),
+                Customer.name.ilike(pat),
+                Customer.phone.ilike(pat),
+                Customer.address.ilike(pat),
+                Product.name.ilike(pat),
+            )
+        )
+
+    # Compute status counts from base_query before applying status_filter
+    status_rows = (
+        base_query.with_entities(DeliveryTask.status, func.count(DeliveryTask.id))
+        .group_by(DeliveryTask.status)
+        .all()
+    )
+    status_counts: dict[str, int] = {st: int(cnt) for st, cnt in status_rows}
+    status_counts["all"] = sum(status_counts.values())
+
+    filtered_query = base_query
+    if status_filter and status_filter != "all":
+        filtered_query = filtered_query.filter(DeliveryTask.status == status_filter)
+
+    total = filtered_query.count()
+    total_pages = max(1, math.ceil(total / page_size))
+
+    rows = (
+        filtered_query.order_by(
+            DeliveryTask.scheduled_date.desc(),
+            DeliveryTask.created_at.desc(),
+            DeliveryTask.sequence_order.asc()
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    return PaginatedOrdersResponse(
+        items=[_serialize_order(db, task, cust, prod, rec) for task, cust, prod, rec in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        status_counts=status_counts,
+    )
 
 
 @router.get("/orders/{order_id}", response_model=DeliveryTaskResponse)
